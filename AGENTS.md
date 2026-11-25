@@ -36,7 +36,11 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
     `UpstreamKeepAlive`, `UpstreamChannel`, `ProxyClients`, `UpstreamPools`/`UpstreamLease`/
     `UpstreamOrigin`, `WebSocketSplice` from `EdgeWebSocketUpgrade`, `ShutdownLinger`), and the
     interception of `CONNECT` tunnels (`Interception`: the loopback listener's options and the
-    tunnels by loopback port; qits-2644). qits-edge's
+    tunnels by loopback port; qits-2644), the forward (`ForwardDoor`, the `GET /egress/api/forward`
+    websocket on 8080; `ForwardedCallers`, its callers by loopback port; qits-2654) and the
+    passthrough (`Passthrough`, its rules and resolve-once check; `PassthroughNetwork`, the resolver
+    and dial seam; `PassthroughOutbound`, what leaves for a plain-http target; the blind splice in
+    `ConnectTunnel.blind`). qits-edge's
     `DrainCount` has no copy: it repairs Quarkus' HTTP drain count, and the proxy listener is a
     plain Vert.x server that `InFlight` counts itself.
   - `tls/` the per-host leaves (qits-2643): `LeafCertificates` (pre-issue, renewal, backoff,
@@ -52,7 +56,9 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
 - **Two listeners, two audiences.** 8080 is behind the public edge (`host: egress`, `routes:
   /egress`): the grant-table door and health. 8081 is the proxy, reached only on the wire alias
   `${QITS_ENVIRONMENT}-qits-egress:8081`. Never put proxy traffic on 8080 or a management door on
-  8081. The third, the interception listener (`qits.egress.tls.port`, 8443), is bound to
+  8081. The one bridge is `GET /egress/api/forward` (`proxy/ForwardDoor`): a byte splice from an
+  edge websocket to 8081 on `127.0.0.1`, deciding nothing itself but who opened it — every request
+  over it is judged on 8081 like any other. Never serve or decide a proxied request on 8080. The third, the interception listener (`qits.egress.tls.port`, 8443), is bound to
   `127.0.0.1` and reached only by the proxy's own tunnels: never bind it anywhere else, and never
   serve a request on it whose tunnel entry is missing.
 - **A tunnel's TLS ends here, and its requests take the absolute-form path** (`EgressProxy.absolute`):
@@ -81,6 +87,21 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
   JSON and audited. Every request form (`EgressProxy.Form`: gateway, absolute, CONNECT) goes
   through the same `CallerIdentity` and the same audit line; the proxy forms answer 407, never
   401, for a missing or bad credential.
+- **A forward's caller is looked up by loopback port only** (`ForwardedCallers.of`): the remote
+  address must be loopback, since 8081 listens on every interface. A request's own
+  `Proxy-Authorization` (gateway form: `Authorization`) always wins over the forward's caller; only
+  a request with none is the forward's.
+- **The passthrough is for principals with a project, never an application**
+  (`Passthrough.applies`), and comes after every granted route. Resolve once, check EVERY address,
+  dial the checked one (`Passthrough.Checked.dial`) — never hand the name to a client that would
+  resolve it again. The caller's `Authorization` and `Cookie` go out on a plain-http passthrough
+  (they are the caller's); never run `EgressOutbound`'s strip or an injection there, and never
+  intercept a passthrough `CONNECT`. A new refusal is `403 {"error":"passthrough refused",
+  "reason"}` with audit reason `passthrough-<reason>`.
+- **The suites' names** (`proxy/SuitePassthroughNetwork`, a `PassthroughNetwork` bean): made-up
+  `*.passthrough.test` names resolve to the literals a test lists, and a checked "public" address
+  (`203.0.113.7`) is dialled on loopback, where the fake upstreams are. Never loosen the address
+  check for a test instead.
 - **A route matched by origin is matched exactly** (`AbsoluteTarget.match`): scheme, host and port,
   with the single `http:80 → https:443` allowance. Never widen it to "any port" or a host suffix: a
   caller could then reach what no route declares.

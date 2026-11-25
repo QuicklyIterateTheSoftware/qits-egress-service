@@ -25,7 +25,7 @@ The application is `qits-egress`, image `qits/qits-egress`, two replicas.
 
 | Port | What | Reached by |
 |---|---|---|
-| 8080 | Quarkus HTTP, the **management** listener: `/egress/api` (the grant-table door) and `/egress/q` (health) | `https://egress.qits.<domain>/egress` through the **public** edge; the deployer's healthcheck at `/egress/q/health/ready` |
+| 8080 | Quarkus HTTP, the **management** listener: `/egress/api` (the grant-table door, and the forward websocket `GET /egress/api/forward` that splices to 8081, qits-2654) and `/egress/q` (health) | `https://egress.qits.<domain>/egress` through the **public** edge; the deployer's healthcheck at `/egress/q/health/ready` |
 | 8081 | Vert.x server (HTTP/1.1, no h2c), the **proxy**: gateway form `/<route>/<rest>` (qits-2620), streams, WebSockets, scrubbing and the drain (qits-2621), absolute-form `HTTP(S)_PROXY` requests and `CONNECT` (qits-2622) | `http://${QITS_ENVIRONMENT}-qits-egress:8081`, the wire alias on qits-net only; no edge routes it |
 | 8443 | Vert.x server, TLS, bound to **127.0.0.1 only**: the **interception** listener, where a granted `CONNECT`'s TLS ends (qits-2644) | only by the proxy's own tunnels; nothing outside the process' network namespace |
 
@@ -49,6 +49,38 @@ public works — the deployer already pushes the edge's route table that way —
 
 The deployer's push client is late work of the epic, after qits-2620 is released; until it pushes,
 the gateway answers every call 503.
+
+## The forward (8080, `GET /egress/api/forward`, qits-2654)
+
+A container on a runner lease (a TARGET workspace, a project agent, the front desk) has no qits-net
+and cannot dial the wire alias; the edges pass websocket upgrades on every route but no layer-4
+traffic. So `qits egress forward` in the container (qits-2655) listens on `127.0.0.1:3128` and opens
+one websocket per TCP connection to `wss://egress.qits.<domain>/egress/api/forward`, and this door
+(`proxy/ForwardDoor`, a Vert.x route on the Quarkus router — no websockets extension) splices it to
+the proxy listener. Policy and identity stay on 8081.
+
+1. **The upgrade's bearer**, `Authorization: Bearer <qits bearer>`, resolved by the same
+   `identity/CallerIdentity`: missing or bad → **401** JSON with `WWW-Authenticate` before the
+   upgrade; idp unreachable → **503**; a request that is no websocket upgrade → **400**. Any
+   principal may open a forward: what it may do is decided per request on 8081.
+2. **The splice**: a connection to `127.0.0.1:<proxy port>`, its LOCAL port registered with the
+   caller in `proxy/ForwardedCallers` (as `Interception` keys its tunnels), the upgrade answered
+   **101**, then both directions with back-pressure: each data frame's bytes to the listener, the
+   listener's bytes back as binary messages. A close or a failure on either side closes the other
+   and releases the port. A listener that cannot be dialled → **502**.
+3. **On 8081**, a request on a connection whose remote address is loopback and whose port is
+   registered: if it carries `Proxy-Authorization` (gateway form: `Authorization`), that credential
+   decides, exactly as on any connection (a Claude launch sends the agent's own token); if it
+   carries none, the forward's caller is the caller — a missing credential is then no 407. Every
+   such request's audit line ends in ` via=forward`, so does every request inside a tunnel opened
+   over a forward, and so does the forward's own line (`method=GET path=/egress/api/forward
+   status=101 reason=forward`, written when it closes; a refused upgrade is a DENY line).
+4. **Shutdown**: a forward's requests and tunnels are exchanges of the proxy listener's drain,
+   served to their end, never cut early.
+
+The caller is identified once, at the upgrade: a forward outlives its token's revocation for as long
+as it stays open. The door is not in `docs/openapi.yml`: it is a byte pipe, not a JSON door, and
+no pact can describe it.
 
 ## The grant-table door (8080, `/egress/api`)
 
@@ -87,7 +119,9 @@ The gateway form, one call in this order (`proxy/EgressProxy`):
    **401** JSON with `WWW-Authenticate: Bearer realm="qits-egress"`; idp unreachable → **503**.
 2. **Principal**: `sub` = `${QITS_ENVIRONMENT}-<application>` with `groups` holding `clients/<sub>`
    and `qits:system` is `application:<application>`; else `agent:<agent>`, `project:<project>`,
-   `subject:<sub>`. Only `application:` principals hold routes.
+   `subject:<sub>`. An `agent:` principal keeps the token's `project` claim (`Principal.project()`
+   answers it, and a `project:` principal's own name): an agent belongs to its project. Only
+   `application:` principals hold routes; a principal with a project gets the passthrough (below).
 3. **No table held** → **503** `{"error":"no grant table yet"}`.
 4. **Grant**: the route (caller application, `<route>`) must exist and its `methods` hold the
    method, else **403** `{"error":"no grant","principal","route","method"}`. A path with a `.`/`..`
@@ -157,6 +191,41 @@ A client configured with `HTTPS_PROXY=http://<any user>:<bearer>@${QITS_ENVIRONM
   a plain-http one. The tunnel's **TLS is ended here** (qits-2644, below): every request inside it
   is served like an absolute-form request. A route that reaches the host:port without `CONNECT`, or
   none at all: **403**. No leaf for the host: **503**.
+
+### The passthrough (qits-2654)
+
+A principal **with a project** — `project:<id>`, or `agent:<id>` carrying its project — reaches an
+outside host that no granted route covers (`proxy/Passthrough`). An application never does: its
+behaviour is unchanged. Per request, in order: a granted route that matches takes the ordinary path
+(interception, injection, scrubbing); else, for a principal with a project, the passthrough; else
+the existing **403** `no grant`. A route that matches the origin but not the method stays **403**
+`method-not-granted`. Without a grant table held, a passthrough still goes (it needs no route).
+
+| Form | Ports (`qits.egress.passthrough.*`) | What leaves |
+|---|---|---|
+| `CONNECT host:port` | `connect-ports=443` | a **blind** splice (`ConnectTunnel.blind`, the pre-qits-2644 raw splice): no interception, no injection |
+| absolute `http://host[:port]/…` | `http-ports=80` | the request as it came (`PassthroughOutbound`): the caller's own `Authorization` and `Cookie` **kept** — they are the caller's; only `Proxy-Authorization` and the hop-by-hop set removed; nothing injected or scrubbed |
+
+An absolute `https://` request no route covers is not passed through (a client tunnels those with
+`CONNECT`), so neither is a request inside an intercepted tunnel. Refused with **403**
+`{"error":"passthrough refused","reason","principal","target"}`, audit `DENY
+reason=passthrough-<reason>`:
+
+- `port` — any other port;
+- `platform-host` — `qits.${QITS_DOMAIN}` (`qits.egress.passthrough.platform-domain`) and every name
+  under it;
+- `single-label` — a name without a dot, such as a wire alias `dev-qits-idp`;
+- `private-address` — the name resolves to ANY non-public address: loopback, `0.0.0.0/8`, `10/8`,
+  `172.16/12`, `192.168/16`, `169.254/16`, `100.64/10`, `240/4`, multicast, `::`, `::1`,
+  `fc00::/7`, `fe80::/10` (an IPv4-mapped, IPv4-compatible or NAT64 `64:ff9b::/96` address by its
+  IPv4 part). An IP literal is checked the same way, without a lookup.
+
+A name that does not resolve is **502** `{"error":"the target cannot be resolved"}`, reason
+`passthrough-unresolved`. **Resolved once, every address checked, the checked address dialled** —
+never the name again — so a DNS answer that changes in between (rebinding) cannot reach qits-net,
+where this process sits beside every platform service. The `Host` sent is still the name. Audit
+of an allowed one: `decision=ALLOW route=- … passthrough=true` (plus ` via=forward` over a forward).
+`qits.egress.passthrough.enabled=false` turns it off.
 
 ### TLS interception in `CONNECT` tunnels (qits-2644)
 
@@ -282,14 +351,18 @@ the connection closes:
 
 A request inside an intercepted tunnel appends ` tls=intercepted`; the `CONNECT` itself has
 `target=<host:port>` and appends ` tls=intercepted leafSerial=<hex>` (the leaf the tunnel's handshake
-is served), written when the tunnel closes.
+is served), written when the tunnel closes. A call the passthrough let out appends
+` passthrough=true`; a call carried over a forward, ` via=forward` (last).
 
 `status` is the upstream's for an allowed call and the gateway's own otherwise. Reasons:
 `no-credentials`, `bad-credentials`, `idp-unreachable`, `no-table`, `no-route`, `bad-path`,
 `no-grant`, `method-not-granted`, `bad-route`, `no-secret`, `exchange-refused`, `bad-target` (an
 absolute-form or `CONNECT` target that does not parse), `no-leaf` (a `CONNECT` whose host gets no
 leaf), `misdirected` (an inner request whose SNI or `Host` is not the tunnel's, 421), `no-tunnel` (a
-loopback connection no tunnel opened), and on an ALLOW
+loopback connection no tunnel opened), `passthrough-port`, `passthrough-platform-host`,
+`passthrough-single-label`, `passthrough-private-address`, `passthrough-unresolved` (the
+passthrough's refusals), `not-an-upgrade`, `listener-unreachable`, `bad-upgrade` (the forward
+door's), and on an ALLOW `forward` for the forward's own line,
 `upstream-unreachable` when the proxy answered 502 itself, `upstream-encoded` when a secret route's
 answer was encoded and refused, `websocket` for a spliced socket (written at its close, status 101). Never a header value, a query value, a
 body or a secret; caller-influenced values are reduced to a safe alphabet.
@@ -344,7 +417,8 @@ qits-egress is public, so it reaches **public platform services only**: qits-idp
 pact row in `pacts/qits-egress-service_qits-idp-service.json`), qits-certificates' leaf and anchors
 doors (at `https://certificates.qits.<domain>/certificates`, through the edge), qits-observability's
 OTLP intake,
-and public targets of platform routes. qits-projects, qits-deployments, qits-ci and every other private service are unreachable
+public targets of platform routes, and — for a principal with a project, through the passthrough —
+public addresses of outside hosts (never a private one, never a platform name). qits-projects, qits-deployments, qits-ci and every other private service are unreachable
 from it — never add a call to one. A private caller or target needs a private egress variant, which
 is follow-up work.
 
