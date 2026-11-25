@@ -53,7 +53,7 @@
              (qits-2620) reads. -->
         <qits.auth-core.version>2026.1125.60148</qits.auth-core.version>
         <!-- Caller stamping on inbound and outbound HTTP. -->
-        <qits.http-core.version>2026.1106.507</qits.http-core.version>
+        <qits.http-core.version>2026.1125.110206</qits.http-core.version>
         <!-- OTLP export to qits-observability through the edge, with the `qits` client's bearer:
              the audit lines reach `qits observe` this way. -->
         <qits.telemetry-core.version>2026.1106.507</qits.telemetry-core.version>
