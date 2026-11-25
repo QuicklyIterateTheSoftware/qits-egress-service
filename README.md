@@ -113,10 +113,54 @@ the connection closes:
 `upstream-unreachable` when the proxy answered 502 itself. Never a header value, a query value, a
 body or a secret; caller-influenced values are reduced to a safe alphabet.
 
+## Per-host leaves (`tls/`, qits-2643)
+
+Groundwork for TLS interception inside `CONNECT` tunnels (epic qits-2524, dossier "Egress TLS
+interception"): every replica holds one **leaf certificate per `https://` target host** of the grant
+table in force, certified by qits-certificates.
+
+- **The key** is EC P-256, generated in this process per issuance (a renewal is a new key), and held
+  in memory only: never written, never logged, never in a door's answer. `Leaf.toString()` carries no
+  key.
+- **The request** is a PKCS#10 CSR (subject `CN=<host>`, extensionRequest SAN `dNSName:<host>`),
+  `POST ${qits.egress.certificates-url}/api/leaves` with `{"csr": "<PEM>"}` and the `qits` client's
+  bearer (`tls/LeafBearer`; client id `<env>-qits-egress`, the requester qits-certificates admits).
+  201 `{certificate, chain, serial, notAfter, anchorId}`; the chain's first certificate must certify
+  the key held and name the host, or the answer is refused.
+- **Pre-issue**: every adopted grant table (`grants/GrantTableAdopted`, fired by `GrantIndex` on a
+  push taken here, a refresh that read a moved version, and the load at boot) hands its https hosts
+  to `LeafCertificates.want`; each host without a valid leaf is issued asynchronously, at most
+  `qits.egress.leaves.concurrency` (4) at a time. Platform routes and unusable routes are skipped.
+- **Renewal** at `qits.egress.leaves.renew-fraction` (two thirds) of a leaf's life, checked every
+  `qits.egress.leaves.check-interval` (5 s, in memory). A failure retries after a backoff doubling
+  from `qits.egress.leaves.backoff-min` (30 s) to `qits.egress.leaves.backoff-max` (10 min); the old
+  leaf is served until its notAfter. A host that left the table is not renewed and its leaf lapses.
+- **On demand**: `LeafCertificates.issueNow(host)` answers the held leaf, joins the issuance in
+  flight, or starts one outside the queue, failing after `qits.egress.leaves.timeout` (10 s) — for
+  the `CONNECT` with no leaf (qits-2622). `leafFor(host)` gives the valid leaf (`key()`, `chain()`)
+  a `KeyManager` picks by SNI.
+- **Readiness is not tied to leaves.** Nothing is shared between replicas. Without a `qits` client
+  (a clone, the suites) nothing is asked for and each attempt is one WARN.
+
+Log lines on logger `eu.wohlben.qits.egress.tls`:
+
+    egress leaf issued host=<h> serial=<hex> notAfter=<iso>                                    (INFO)
+    egress leaf failed host=<h> status=<n or -> reason=<r> retryIn=<d> serving=<serial or ->   (WARN)
+
+| Key | Default |
+|---|---|
+| `qits.egress.certificates-url` | `https://certificates.qits.${QITS_DOMAIN}/certificates` (through the edge) |
+| `qits.egress.leaves.renew-fraction` | `0.6667` |
+| `qits.egress.leaves.concurrency` | `4` |
+| `qits.egress.leaves.backoff-min` / `backoff-max` | `30s` / `10m` |
+| `qits.egress.leaves.timeout` | `10s` (each call, and the inline wait) |
+| `qits.egress.leaves.check-interval` | `5s` |
+
 ## What it may call
 
 qits-egress is public, so it reaches **public platform services only**: qits-idp (at
-`https://idp.qits.<domain>/idp`), qits-observability's OTLP intake, and public targets of platform
+`https://idp.qits.<domain>/idp`), qits-certificates' leaf door (at
+`https://certificates.qits.<domain>/certificates`, through the edge), qits-observability's OTLP intake, and public targets of platform
 routes. qits-projects, qits-deployments, qits-ci and every other private service are unreachable
 from it — never add a call to one. A private caller or target needs a private egress variant, which
 is follow-up work.

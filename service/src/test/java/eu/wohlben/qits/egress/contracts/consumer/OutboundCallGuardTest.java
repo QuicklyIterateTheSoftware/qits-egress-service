@@ -64,7 +64,13 @@ class OutboundCallGuardTest {
           "eu.wohlben.qits.egress.proxy.EgressProxy",
           "the proxied call to a granted route's third-party target: no qits service",
           "eu.wohlben.qits.egress.proxy.ProxyClients",
-          "builds the proxy's upstream client");
+          "builds the proxy's upstream client",
+          "eu.wohlben.qits.egress.tls.LeafDoor",
+          "qits-certificates issueLeaf (CertificatesPactTest LEAF_ISSUED)",
+          "eu.wohlben.qits.egress.tls.LeafWiring",
+          "builds the client LeafDoor dials with",
+          "eu.wohlben.qits.egress.tls.LeafBearer",
+          "the `qits` client's mint (IdpPactTest MINT)");
 
   private static final JavaClasses PRODUCTION =
       new ClassFileImporter()

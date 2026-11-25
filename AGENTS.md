@@ -30,7 +30,11 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
   - `proxy/` the 8081 listener (`EgressProxy`), what leaves for the upstream (`EgressOutbound`),
     the audit line (`AuditLine`), the secrets (`SecretStore`), and the qits-edge copies
     (`EdgeHopByHop`, `EdgeRequestFraming`, `UpstreamRetry`, `UpstreamKeepAlive`, `UpstreamChannel`,
-    `ProxyClients`).
+    `ProxyClients`);
+  - `tls/` the per-host leaves (qits-2643): `LeafCertificates` (pre-issue, renewal, backoff,
+    `issueNow`, `leafFor`), `LeafDoor` (the dial at qits-certificates and the `LeafIssuer` on it),
+    `LeafKeys` (key, CSR, chain check), `LeafBearer` (the `qits` client's token), `LeafWiring` (the
+    `GrantTableAdopted` observer, the periodic tick, the producer).
 
 ## Conventions
 
@@ -55,6 +59,10 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
   so the caller's credentials would leave and no secret would be injected. It is off
   (`setSupportWebSocket(false)`) until qits-2621 splices upgrades itself.
 - **Secrets** (`QITS_EGRESS_SECRET_*`) never reach a log, a door, an error body or an audit line.
+- **Leaf keys** never leave the process: no file, no log, no door, no `toString`. A new key per
+  issuance. Readiness never waits for a leaf.
+- **A change of the table in force** is announced as `grants/GrantTableAdopted` (a synchronous CDI
+  event under `GrantIndex`'s lock): an observer records and schedules, never blocks or throws.
 
 ## Native traps
 
@@ -66,6 +74,12 @@ Green in `./mvnw verify`, broken only in the native binary. Keep them in mind:
   2026.1123.194720 found no roster at all without it).
 - **Reflection**: every type bound by Jackson on a door or an outbound client is registered for
   reflection (`@RegisterForReflection`), with a test that the list is complete.
+- **Randomness**: never a `SecureRandom`, `KeyPairGenerator` or anything seeded in a static field
+  or at build time — the image heap refuses it (qits-certificates' first native release). `tls/LeafKeys`
+  creates each per call.
+- **No JSON binding in `tls/`**: the leaf answer is read as a Vert.x `JsonObject` tree, so there is
+  no type to register for reflection; a record bound by Jackson would join a `@RegisterForReflection`
+  list with its test.
 - **No eventstream** here today; a service that adds one takes over the outbox datasource and the
   bearer rules of qits-eventstream.
 
@@ -75,6 +89,7 @@ Every one of these compares by default and fails with a diff; `-Dgolden.update=t
 
 | File | Written by |
 |---|---|
+| `pacts/*_qits-certificates-service.json` | `contracts/consumer/CertificatesPactTest` (`leaf issued`, through the real `LeafDoor.post` with the state's CSR) |
 | `pacts/*_qits-idp-service.json` | `contracts/consumer/IdpPactTest` (the mint row run by `IdpTokenMintPactTest`, the introspection rows by `IdpIntrospectionPactTest`) |
 | `golden-masters/**` | `contracts/GoldenMasterRecordingTest`, states in `contracts/ProviderStates` |
 | `docs/openapi.yml` | `api/OpenApiSchemaExportTest` (always rewrites; the diff is the review) |
