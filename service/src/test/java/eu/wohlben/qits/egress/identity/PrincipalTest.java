@@ -47,4 +47,25 @@ class PrincipalTest {
     assertEquals("subject:person", Principal.of(claims("person"), "dev").toString());
     assertEquals("subject:-", Principal.of(new JsonObject(), "dev").toString());
   }
+
+  @Test
+  void anAgentKeepsItsProject() {
+    JsonObject agent = claims("tok-x", "qits:agent").put("agent", "developer").put("project", "qits");
+    Principal principal = Principal.of(agent, "dev");
+    assertEquals("agent:developer", principal.toString(), "the audit line still names the agent");
+    assertEquals("qits", principal.project());
+    assertNull(Principal.of(claims("tok-x").put("agent", "developer"), "dev").project());
+    assertEquals("qits", Principal.of(claims("tok-y").put("project", "qits"), "dev").project());
+    assertEquals("qits", new Principal("project", "qits").project());
+  }
+
+  @Test
+  void anApplicationAndASubjectHaveNoProject() {
+    assertNull(
+        Principal.of(
+                claims("dev-qits-edge", "clients/dev-qits-edge", "qits:system").put("project", "qits"),
+                "dev")
+            .project());
+    assertNull(Principal.of(claims("person"), "dev").project());
+  }
 }
