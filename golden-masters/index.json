@@ -1,0 +1,136 @@
+{
+  "formatVersion": 1,
+  "provider": "qits-egress",
+  "states": [
+    {
+      "name": "a grant table is held",
+      "slug": "a-grant-table-is-held",
+      "params": {
+        "authorization": "Bearer contract-qits-deployments",
+        "version": "1764061200000"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "getGrantTable",
+          "method": "GET",
+          "path": "/egress/api/grant-table",
+          "headers": {
+            "Authorization": "{authorization}"
+          },
+          "status": 200,
+          "file": "a-grant-table-is-held/getGrantTable.json",
+          "frozen": {
+            "ids": [],
+            "instants": [
+              "$.receivedAt"
+            ],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "putGrantTable",
+          "method": "PUT",
+          "path": "/egress/api/grant-table",
+          "headers": {
+            "Authorization": "{authorization}"
+          },
+          "body": {
+            "version": 1764061200000,
+            "routes": [
+              {
+                "application": "qits-edge",
+                "environment": "dev",
+                "deployedVersion": "2026.1201.101010",
+                "name": "hetzner",
+                "target": "https://api.hetzner.cloud",
+                "secret": "HETZNER_DNS",
+                "inject": "bearer",
+                "methods": [
+                  "DELETE",
+                  "GET",
+                  "POST",
+                  "PUT"
+                ]
+              }
+            ],
+            "refused": []
+          },
+          "status": 204,
+          "file": null,
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "no grant table is held",
+      "slug": "no-grant-table-is-held",
+      "params": {
+        "authorization": "Bearer contract-qits-deployments",
+        "version": "1764061200000"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "getGrantTable",
+          "method": "GET",
+          "path": "/egress/api/grant-table",
+          "headers": {
+            "Authorization": "{authorization}"
+          },
+          "status": 404,
+          "file": "no-grant-table-is-held/getGrantTable.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "putGrantTable",
+          "method": "PUT",
+          "path": "/egress/api/grant-table",
+          "headers": {
+            "Authorization": "{authorization}"
+          },
+          "body": {
+            "version": 1764061200000,
+            "routes": [
+              {
+                "application": "qits-edge",
+                "environment": "dev",
+                "deployedVersion": "2026.1201.101010",
+                "name": "hetzner",
+                "target": "https://api.hetzner.cloud",
+                "secret": "HETZNER_DNS",
+                "inject": "bearer",
+                "methods": [
+                  "DELETE",
+                  "GET",
+                  "POST",
+                  "PUT"
+                ]
+              }
+            ],
+            "refused": []
+          },
+          "status": 204,
+          "file": null,
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    }
+  ]
+}

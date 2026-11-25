@@ -5,19 +5,28 @@ archetype: java-service
 
 artifacts:
   - { type: docker, name: qits/qits-egress, sbom: .sbom/sbom.json }
+  # The committed OpenAPI document, published as `@apidocs/qits-egress` on every release
+  # (OpenApiSchemaExportTest keeps it current): the grant-table door.
+  - { type: docs, name: "@apidocs/qits-egress", path: docs/openapi.yml }
 
 # The userflow catalogue (service/src/test/.../stories/**IT), published as @userflows/qits-egress:
 # the java-service recipe's build-and-test step requires */target/userstories from the verify.
 userflows: qits-egress
 
-# THE PACTS this service writes as a consumer, flat in `pacts/`:
-#   qits-idp-service       quarkus-oidc's discovery and JWKS reads and the `qits` client's mint
-#                          (contracts/consumer/IdpPactTest, IdpTokenMintPactTest).
+# The provider golden masters: the platform packages `golden-masters/` as
+# `eu.wohlben.qits:qits-egress-golden-masters` (maven) and `@qits/egress-golden-masters` (npm).
+# contracts/GoldenMasterRecordingTest records them; the consumer is qits-deployments' push client.
 #
-# No golden masters, no `@apidocs`, no entity map and no entity diagram yet: the scaffold serves no
-# operation and maps no entity. The grant-table door (qits-2620) brings docs/openapi.yml, the
-# `@apidocs/qits-egress` docs artifact, `golden-masters:`, `entities:` and `database:` together.
+# THE PACTS this service writes as a consumer, flat in `pacts/`:
+#   qits-idp-service       quarkus-oidc's discovery and JWKS reads (which the proxy listener's caller
+#                          identity reads too), the `qits` client's mint, and the opaque-token
+#                          introspection (contracts/consumer/IdpPactTest, IdpTokenMintPactTest,
+#                          IdpIntrospectionPactTest).
+#
+# No entity map and no entity diagram: the grant table is stored by plain JDBC (one row, a JSON
+# body), so there is no @Entity to map.
 contracts:
   application: qits-egress
+  golden-masters: { from: golden-masters/, packages: [maven, npm] }
   pacts:
     qits-idp-service: { packages: [maven] }

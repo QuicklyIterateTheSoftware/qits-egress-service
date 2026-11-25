@@ -1,0 +1,22 @@
+{
+  "version": 1764061200000,
+  "receivedAt": "2026-01-01T00:00:00Z",
+  "routes": [
+    {
+      "application": "qits-edge",
+      "environment": "dev",
+      "deployedVersion": "2026.1201.101010",
+      "name": "hetzner",
+      "target": "https://api.hetzner.cloud",
+      "secret": "HETZNER_DNS",
+      "inject": "bearer",
+      "methods": [
+        "DELETE",
+        "GET",
+        "POST",
+        "PUT"
+      ]
+    }
+  ],
+  "refused": []
+}

@@ -29,6 +29,18 @@
             <artifactId>quarkus-rest-jackson</artifactId>
         </dependency>
         <dependency>
+            <!-- docs/openapi.yml (OpenApiSchemaExportTest), published as @apidocs/qits-egress. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-smallrye-openapi</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The proxy listener (8081): HttpProxy.reverseProxy streams request and response
+                 bodies without buffering them, as qits-edge's does. Version managed by the
+                 platform BOM. -->
+            <groupId>io.vertx</groupId>
+            <artifactId>vertx-http-proxy</artifactId>
+        </dependency>
+        <dependency>
             <!-- /egress/q/health/ready, with a readiness check for the datasource. -->
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-smallrye-health</artifactId>
@@ -93,6 +105,13 @@
             <!-- idp.MockIdp: discovery, JWKS and token minting for the packaged ITs. -->
             <groupId>${project.groupId}</groupId>
             <artifactId>qits-service-mock</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- ConsumerPactVerificationTest: verifies the consumer pacts this provider pins (none
+                 yet: qits-deployments' push client is the first). -->
+            <groupId>au.com.dius.pact.provider</groupId>
+            <artifactId>junit5</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
