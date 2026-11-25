@@ -17,11 +17,20 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
 ## Layout
 
 - `domain/` — owns the `egress` datasource and the Flyway lineage at `db/egress/migration` (schema
-  `egress`). `V1__grant_table.sql` creates `egress_grant_table`; its entity, its store and the
-  persistence unit (`quarkus.hibernate-orm.egress.*`) come with qits-2620. A new entity is marked
-  for `CausationRowRules` (`CausedRow` or `@Uncaused`), and `EntityExposureTest` arrives with it.
-- `service/` — the deployable: health and the management API under `/egress` on 8080, the proxy
-  listener on 8081 (qits-2620), and every database-backed test.
+  `egress`). `V1__grant_table.sql` creates `egress_grant_table`; `store/GrantTableStore` reads and
+  writes its one row by **plain JDBC** — no persistence unit, no entity. The first entity, if one
+  ever comes, is marked for `CausationRowRules` (`CausedRow` or `@Uncaused`) and brings
+  `EntityExposureTest`, `docs/entities.json` and `entities:`/`database:` in release.yml.
+- `service/` — the deployable:
+  - `api/` the grant-table door (`GrantTableResource`, the publisher check `GrantTablePublisher`,
+    the wire records `GrantTableWire`, their native registration `ApiWireReflection`);
+  - `grants/` the in-memory index each replica enforces and its refresh (`GrantIndex`, `GrantRoute`);
+  - `identity/` the proxy listener's caller identity (`CallerIdentity`, `IdpKeys`, `SignedJwt`,
+    `IdpIntrospection`, `Principal`), copied from qits-edge and adapted;
+  - `proxy/` the 8081 listener (`EgressProxy`), what leaves for the upstream (`EgressOutbound`),
+    the audit line (`AuditLine`), the secrets (`SecretStore`), and the qits-edge copies
+    (`EdgeHopByHop`, `EdgeRequestFraming`, `UpstreamRetry`, `UpstreamKeepAlive`, `UpstreamChannel`,
+    `ProxyClients`).
 
 ## Conventions
 
@@ -34,9 +43,17 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
 - **Public, so public peers only.** No call to qits-projects, qits-deployments, qits-ci or any other
   `exposure: private` service: from qits-net it times out or hits the public edge, which refuses it
   (qits-agents paid for this in qits-2518).
-- **Outbound calls** are guarded by `contracts/consumer/OutboundCallGuardTest`: each one is a row
-  of that provider's consumer pact. The scaffold dials nothing itself; the proxy's upstream client
-  and its idp calls (introspection, exchange) are named there with their rows when they arrive.
+- **Outbound calls** are guarded by `contracts/consumer/OutboundCallGuardTest`: only the classes in
+  its `DIALLERS` reach an HTTP client, each named with the rows that cover its calls (the idp's
+  discovery, JWKS and `introspectToken`). The proxy's upstream calls go to third parties and carry
+  no pact; a `platform:` route's call (qits-2623) brings its row.
+- **The proxy listener is not Quarkus HTTP.** Nothing on 8081 passes quarkus-oidc, the security
+  layer or a JAX-RS filter: every check is in `proxy/EgressProxy`, and every refusal it writes is
+  JSON and audited. A new request form (qits-2622) goes through the same `CallerIdentity` and the
+  same audit line.
+- **Never forward an upgrade through `HttpProxy`'s own WebSocket path**: it skips the interceptors,
+  so the caller's credentials would leave and no secret would be injected. It is off
+  (`setSupportWebSocket(false)`) until qits-2621 splices upgrades itself.
 - **Secrets** (`QITS_EGRESS_SECRET_*`) never reach a log, a door, an error body or an audit line.
 
 ## Native traps
@@ -58,16 +75,25 @@ Every one of these compares by default and fails with a diff; `-Dgolden.update=t
 
 | File | Written by |
 |---|---|
-| `pacts/*_qits-idp-service.json` | `contracts/consumer/IdpPactTest` (the mint row run by `IdpTokenMintPactTest`) |
+| `pacts/*_qits-idp-service.json` | `contracts/consumer/IdpPactTest` (the mint row run by `IdpTokenMintPactTest`, the introspection rows by `IdpIntrospectionPactTest`) |
+| `golden-masters/**` | `contracts/GoldenMasterRecordingTest`, states in `contracts/ProviderStates` |
+| `docs/openapi.yml` | `api/OpenApiSchemaExportTest` (always rewrites; the diff is the review) |
 
-The first door brings `docs/openapi.yml` (`OpenApiSchemaExportTest`) and `golden-masters/**`
-(`GoldenMasterRecordingTest`) in the same commit, and `release.yml` declares them then: the release
-gate fails any operation of `docs/openapi.yml` that `golden-masters/index.json` does not cover. The
-first entity brings `docs/entities.json` (`EntityExposureTest`) and `docs/database/egress.md`:
+The release gate fails any operation of `docs/openapi.yml` that `golden-masters/index.json` does not
+cover, so a new door joins `GoldenMasterRecordingTest.INTERACTIONS` in the same commit. The
+provider states are `a grant table is held` and `no grant table is held`; both grant
+`Bearer contract-qits-deployments` as the deployer's own client and hand it as `authorization`.
+`ConsumerPactVerificationTest` verifies pinned consumer pacts (none yet; qits-deployments' push
+client is the first — then flip `ClasspathPactLoader.REQUIRED`).
 
-    ./mvnw -q -Dmaven.test.skip=true test-compile dependency:build-classpath \
-      -Dmdep.outputFile=target/qits-classpath.txt -DincludeScope=runtime
-    qits database diagram
+## The suites' idp
+
+Every `@QuarkusTest` points `qits.egress.idp.url` at `testdb/SuiteIdp` (registered by
+`testdb/MockIdpConfigSource`): discovery and a settable token introspection, in front of
+`MockIdp`'s issuer and JWKS, so tokens minted with `MockIdp.token()` validate at the gateway.
+MockIdp's own stubs cannot be used from a `@QuarkusTest` (a different class loader started it);
+`SuiteIdp` crosses loaders through system properties. The gateway suite's upstream is plain http,
+allowed only by `qits.egress.test.allow-plain-http=true` in the test properties.
 
 ## The userflow catalogue
 

@@ -26,7 +26,7 @@ The application is `qits-egress`, image `qits/qits-egress`, two replicas.
 | Port | What | Reached by |
 |---|---|---|
 | 8080 | Quarkus HTTP, the **management** listener: `/egress/api` (the grant-table door) and `/egress/q` (health) | `https://egress.qits.<domain>/egress` through the **public** edge; the deployer's healthcheck at `/egress/q/health/ready` |
-| 8081 | Vert.x server, the **proxy**: gateway form `/<route>/<rest>`, absolute-form `HTTPS_PROXY` requests and `CONNECT` (qits-2620, qits-2621, qits-2622) | `http://${QITS_ENVIRONMENT}-qits-egress:8081`, the wire alias on qits-net only; no edge routes it |
+| 8081 | Vert.x server, the **proxy**: gateway form `/<route>/<rest>` (qits-2620); absolute-form `HTTPS_PROXY` requests and `CONNECT` come with qits-2622, streams and drain with qits-2621 | `http://${QITS_ENVIRONMENT}-qits-egress:8081`, the wire alias on qits-net only; no edge routes it |
 
 ## The grant table is pushed, not pulled
 
@@ -46,8 +46,72 @@ public works — the deployer already pushes the edge's route table that way —
 - Until a table exists, every proxied call answers **503 "no grant table yet"**. Readiness does
   **not** wait for it, or the first deployment could never pass its gate.
 
-The door, the store and enforcement land in qits-2620; the deployer's push client is late work of
-the epic, after qits-2620 is released.
+The deployer's push client is late work of the epic, after qits-2620 is released; until it pushes,
+the gateway answers every call 503.
+
+## The grant-table door (8080, `/egress/api`)
+
+| Door | Who | Answers |
+|---|---|---|
+| `PUT /egress/api/grant-table` | qits-deployments' own client only: `@RolesAllowed("qits:system")` **and** a JWT whose `sub` is `qits.egress.grant-table.publisher` (`${QITS_ENVIRONMENT}-qits-deployments`) and whose `groups` hold `clients/<sub>` (`api/GrantTablePublisher`). Any other caller, another `qits:system` service included, is 403. | 204 stored, 204 when the same version is held (idempotent), 409 `{"error","held"}` when older, 400 without a version |
+| `GET /egress/api/grant-table` | the same publisher, `qits:admin`, `qits:admin-agent`, `qits:desk-admin`, `qits:agent` | 200 `{version, receivedAt, routes, refused}`, 404 when none is held |
+
+The body is exactly the deployer's table (`GET /deployments/api/egress-grants`): `{version,
+routes:[{application, environment, deployedVersion, name, target, secret, inject, methods[]}],
+refused:[{application, deployedVersion, reason}]}`. It is stored by plain JDBC in
+`egress.egress_grant_table` (one row, the body as `jsonb`); the conditional upsert stores only a
+higher version, so two replicas taking two pushes cannot store the older one last.
+
+**Replica sync** (`grants/GrantIndex`): the replica that took the push adopts it at once; every
+replica loads the table at boot and reads the held version every `qits.egress.grants.refresh` (5 s),
+re-reading the body only when it moved. In memory the table is an immutable index `(application,
+route name) → route`, compiled once (target, injection), replaced whole.
+
+## The gateway (8081)
+
+`/<route>/<rest>?<query>`, one call in this order (`proxy/EgressProxy`):
+
+1. **Caller** from `Authorization: Bearer` (`identity/CallerIdentity`): a JWT is validated offline
+   (RS256, a `kid` of the idp's JWKS, the issuer of the idp's discovery, `exp`, `aud` holding
+   `qits-platform`); a `qits_tok_…` is introspected at `<idp>/api/tokens/introspect` with this
+   service's own Basic client pair, cached 15 s against a SHA-256 of the token. Missing or bad →
+   **401** JSON with `WWW-Authenticate: Bearer realm="qits-egress"`; idp unreachable → **503**.
+2. **Principal**: `sub` = `${QITS_ENVIRONMENT}-<application>` with `groups` holding `clients/<sub>`
+   and `qits:system` is `application:<application>`; else `agent:<agent>`, `project:<project>`,
+   `subject:<sub>`. Only `application:` principals hold routes.
+3. **No table held** → **503** `{"error":"no grant table yet"}`.
+4. **Grant**: the route (caller application, `<route>`) must exist and its `methods` hold the
+   method, else **403** `{"error":"no grant","principal","route","method"}`. A path with a `.`/`..`
+   segment is 400.
+5. `platform:` routes → **501** (qits-2623). A secret this process does not hold → **502**
+   `{"error":"secret not configured"}`.
+6. **Out** through `vertx-http-proxy` (bodies stream both ways) to `<target><rest>?<query>` over
+   TLS, `Host` the target's. Removed: `Authorization`, `Proxy-Authorization`, `Cookie`, every
+   `X-Qits-*` header and the hop-by-hop set. Injected: `inject: bearer` → `Authorization: Bearer
+   <secret>`; `inject: header:<Name>` → `<Name>: <secret>`.
+
+WebSocket upgrades are not spliced yet (qits-2621): the proxy's own upgrade path would skip the
+interceptors, so it is off and an upgrade travels as a plain request.
+
+### Secrets
+
+A route's `secret: HETZNER_DNS` is the value of the environment variable
+`QITS_EGRESS_SECRET_HETZNER_DNS` — a secret setting (`pd_setting`, `secret: true`) of the
+application `qits-egress`. Read once at boot into `proxy/SecretStore`; the boot log names the secrets
+held, never a value; no value reaches a log, an error body or an audit line.
+
+### The audit line
+
+One INFO line per call on logger `eu.wohlben.qits.egress.audit`, written when the response ends or
+the connection closes:
+
+    egress decision=ALLOW|DENY principal=<p> route=<r> method=<M> target=<host> path=<path without query> status=<n> durationMs=<n> reason=<reason or ->
+
+`status` is the upstream's for an allowed call and the gateway's own otherwise. Reasons:
+`no-credentials`, `bad-credentials`, `idp-unreachable`, `no-table`, `no-route`, `bad-path`,
+`no-grant`, `method-not-granted`, `platform-route`, `bad-route`, `no-secret`, and on an ALLOW
+`upstream-unreachable` when the proxy answered 502 itself. Never a header value, a query value, a
+body or a secret; caller-influenced values are reduced to a safe alphabet.
 
 ## What it may call
 
