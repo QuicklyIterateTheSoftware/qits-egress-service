@@ -62,8 +62,13 @@ final class EgressOutbound implements ProxyInterceptor {
     request.setURI(uri);
     request.setAuthority(HostAndPort.create(route.host(), route.port()));
     strip(request.headers());
-    request.headers().set(route.injectHeader(), route.injectPrefix() + secret);
+    inject(request.headers(), route, secret);
     return context.sendRequest();
+  }
+
+  /** The route's secret in the one header it is for. */
+  static void inject(MultiMap headers, GrantRoute route, String secret) {
+    headers.set(route.injectHeader(), route.injectPrefix() + secret);
   }
 
   @Override

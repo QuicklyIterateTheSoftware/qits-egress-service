@@ -28,9 +28,13 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
   - `identity/` the proxy listener's caller identity (`CallerIdentity`, `IdpKeys`, `SignedJwt`,
     `IdpIntrospection`, `Principal`), copied from qits-edge and adapted;
   - `proxy/` the 8081 listener (`EgressProxy`), what leaves for the upstream (`EgressOutbound`),
-    the audit line (`AuditLine`), the secrets (`SecretStore`), and the qits-edge copies
-    (`EdgeHopByHop`, `EdgeRequestFraming`, `UpstreamRetry`, `UpstreamKeepAlive`, `UpstreamChannel`,
-    `ProxyClients`).
+    the audit line (`AuditLine`), the secrets (`SecretStore`), the scrubbing (`Scrubber`,
+    `ScrubbingReadStream`, `ResponseScrub`), the exchanges in flight and the drain (`InFlight`),
+    and the qits-edge copies (`EdgeHopByHop`, `EdgeRequestFraming`, `UpstreamRetry`,
+    `UpstreamKeepAlive`, `UpstreamChannel`, `ProxyClients`, `UpstreamPools`/`UpstreamLease`/
+    `UpstreamOrigin`, `WebSocketSplice` from `EdgeWebSocketUpgrade`, `ShutdownLinger`). qits-edge's
+    `DrainCount` has no copy: it repairs Quarkus' HTTP drain count, and the proxy listener is a
+    plain Vert.x server that `InFlight` counts itself.
 
 ## Conventions
 
@@ -53,7 +57,16 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
   same audit line.
 - **Never forward an upgrade through `HttpProxy`'s own WebSocket path**: it skips the interceptors,
   so the caller's credentials would leave and no secret would be injected. It is off
-  (`setSupportWebSocket(false)`) until qits-2621 splices upgrades itself.
+  (`setSupportWebSocket(false)`); `WebSocketSplice` handshakes with the headers
+  `EgressProxy.handshakeHeaders` + `EgressOutbound.inject` prepare, the same as an ordinary call.
+- **Every exchange is settled exactly once** (`InFlight.Exchange`), and the audit line is written
+  from that settlement. A new way of answering (a splice, a tunnel) calls `Exchange.splice()` before
+  `toNetSocket()` and `settle()` on the socket's close, or the drain waits out its 5 minutes.
+- **A secret route's answer is scrubbed, streamed**: never buffer a body to scrub it. A new route
+  kind that injects a secret adds `ResponseScrub` to its chain; one that injects none (a platform
+  route) does not.
+- **Suites that drain** call `EgressProxy.reopen()` afterwards (`EgressStreamingTest`); the
+  listener is shared by every `@QuarkusTest` of the profile.
 - **Secrets** (`QITS_EGRESS_SECRET_*`) never reach a log, a door, an error body or an audit line.
 
 ## Native traps

@@ -84,6 +84,20 @@ final class AuditLine {
     return this;
   }
 
+  /**
+   * A reason on a call whatever its decision: an ALLOW that still carries one ({@code websocket},
+   * {@code upstream-encoded}).
+   */
+  AuditLine reason(String reason) {
+    this.reason = reason;
+    return this;
+  }
+
+  /** Whether the line is written already. */
+  boolean written() {
+    return written.get();
+  }
+
   /** The upstream answered with a response head. */
   void upstreamAnswered() {
     this.upstreamAnswered = true;

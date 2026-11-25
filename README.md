@@ -26,7 +26,7 @@ The application is `qits-egress`, image `qits/qits-egress`, two replicas.
 | Port | What | Reached by |
 |---|---|---|
 | 8080 | Quarkus HTTP, the **management** listener: `/egress/api` (the grant-table door) and `/egress/q` (health) | `https://egress.qits.<domain>/egress` through the **public** edge; the deployer's healthcheck at `/egress/q/health/ready` |
-| 8081 | Vert.x server, the **proxy**: gateway form `/<route>/<rest>` (qits-2620); absolute-form `HTTPS_PROXY` requests and `CONNECT` come with qits-2622, streams and drain with qits-2621 | `http://${QITS_ENVIRONMENT}-qits-egress:8081`, the wire alias on qits-net only; no edge routes it |
+| 8081 | Vert.x server (HTTP/1.1, no h2c), the **proxy**: gateway form `/<route>/<rest>` (qits-2620), streams, WebSockets, scrubbing and the drain (qits-2621); absolute-form `HTTPS_PROXY` requests and `CONNECT` come with qits-2622 | `http://${QITS_ENVIRONMENT}-qits-egress:8081`, the wire alias on qits-net only; no edge routes it |
 
 ## The grant table is pushed, not pulled
 
@@ -88,10 +88,43 @@ route name) → route`, compiled once (target, injection), replaced whole.
 6. **Out** through `vertx-http-proxy` (bodies stream both ways) to `<target><rest>?<query>` over
    TLS, `Host` the target's. Removed: `Authorization`, `Proxy-Authorization`, `Cookie`, every
    `X-Qits-*` header and the hop-by-hop set. Injected: `inject: bearer` → `Authorization: Bearer
-   <secret>`; `inject: header:<Name>` → `<Name>: <secret>`.
+   <secret>`; `inject: header:<Name>` → `<Name>: <secret>`. `Accept-Encoding: identity`, so the
+   answer can be scrubbed.
+7. **Back**, scrubbed (below), streamed as it arrives.
 
-WebSocket upgrades are not spliced yet (qits-2621): the proxy's own upgrade path would skip the
-interceptors, so it is off and an upgrade travels as a plain request.
+### Streams and WebSockets
+
+- **Two upstream pools** (`proxy/UpstreamPools`, from qits-edge): a long-lived stream — a WebSocket
+  upgrade, or a GET/HEAD whose `Accept` names `text/event-stream` (`EgressProxy.isStream`) — goes
+  through a client of its own, so streams to one third party never fill the pool its ordinary
+  calls need. Each pool counts its connections per origin, leases each to the exchange it carries
+  (`proxy/UpstreamLease`, no query, no credential) and WARNs once a minute for an origin under
+  pressure, naming the five oldest leases.
+- **Bodies stream both ways**: an SSE event or a chunk reaches the caller when the upstream sends
+  it, not when the upstream ends (`EgressStreamingTest`).
+- **A WebSocket** (`proxy/WebSocketSplice`, from qits-edge's `EdgeWebSocketUpgrade`) goes through
+  the same identity, grant and injection as any call: the handshake leaves with the caller's
+  credentials, cookie and `X-Qits-*` removed and the route's secret injected, from the stream pool;
+  on the upstream's `101` the two sockets are spliced with back-pressure, and a close on either side
+  closes the other. Its audit line is written when the socket closes: `method=GET status=101
+  reason=websocket`. vertx-http-proxy's own upgrade path skips the interceptors and stays off.
+
+### Scrubbing (secret routes)
+
+The upstream may echo the credential — an error quoting the request, a redirect carrying it. The
+calling application must not learn it, so `proxy/Scrubber` replaces the secret, its base64
+(standard and URL alphabet) and its URL-encoded forms with `[redacted]`:
+
+- in every **response header** value, `Location` included;
+- in the **body**, streamed (`proxy/ScrubbingReadStream`): a byte is released as soon as no form
+  can start at it, so at most `len(longest form) - 1` bytes are ever held back and a value split
+  across chunks is still caught; `Content-Length` is removed and the answer leaves chunked;
+- an answer with a `Content-Encoding` other than `identity` (the request asked for identity) cannot
+  be read, so it is refused: **502** `{"error":"the upstream answered with a content encoding"}`,
+  audit ALLOW with reason `upstream-encoded`;
+- the gateway's own error bodies are fixed texts, and the proxy's own 502 has no body.
+
+Not scrubbed: WebSocket frames (spliced as bytes; a replacement would break a frame's length).
 
 ### Secrets
 
@@ -110,7 +143,8 @@ the connection closes:
 `status` is the upstream's for an allowed call and the gateway's own otherwise. Reasons:
 `no-credentials`, `bad-credentials`, `idp-unreachable`, `no-table`, `no-route`, `bad-path`,
 `no-grant`, `method-not-granted`, `platform-route`, `bad-route`, `no-secret`, and on an ALLOW
-`upstream-unreachable` when the proxy answered 502 itself. Never a header value, a query value, a
+`upstream-unreachable` when the proxy answered 502 itself, `upstream-encoded` when a secret route's
+answer was encoded and refused, `websocket` for a spliced socket (written at its close, status 101). Never a header value, a query value, a
 body or a secret; caller-influenced values are reduced to a safe alphabet.
 
 ## What it may call
@@ -128,10 +162,22 @@ is follow-up work.
 `stop_grace_period: 6m`, no `exposure:` (public). With `replicas:` there is no `publishes:` and no
 stop-first.
 
-Shutdown: `quarkus.shutdown.delay=10s` (swarm takes the task out of the VIP, readiness DOWN), then
-the drain waits for in-flight requests and tunnels up to `quarkus.shutdown.timeout=5m`. Open
-streams are not closed early: a restart must drop no running call. `stop_grace_period: 6m` is above
-that sum.
+Shutdown, on SIGTERM:
+
+1. `quarkus.shutdown.delay=10s`: swarm takes the task out of the VIP, readiness answers DOWN, and
+   the proxy listener keeps serving (`ShutdownDelayInitiatedEvent` only logs what it carries).
+2. The **drain** (`EgressProxy.draining` on `ShutdownEvent`, `proxy/InFlight`): a new connection to
+   8081 is closed on arrival; every call in flight — and any request arriving on a connection
+   already open — is served to its end, streams, WebSockets and tunnels included, up to
+   `quarkus.shutdown.timeout=5m`. Nothing is closed early: a restart must drop no running call. The
+   listener counts its own exchanges (Quarkus' HTTP drain does not see a plain Vert.x server): one
+   is over when its response ends or closes, when its connection closes (a reset response), or — a
+   spliced socket — when the socket closes. After the drain, a request on a connection still open
+   has the connection closed unanswered, so its client retries elsewhere.
+3. The **linger**, `qits.egress.shutdown.linger=10s` (`proxy/ShutdownLinger`, from qits-edge), so the
+   kernel can send what the last answers handed it before swarm tears the namespace down.
+
+`stop_grace_period: 6m` is above that sum.
 
 ## Build
 

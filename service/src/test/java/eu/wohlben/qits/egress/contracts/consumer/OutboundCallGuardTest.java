@@ -64,7 +64,9 @@ class OutboundCallGuardTest {
           "eu.wohlben.qits.egress.proxy.EgressProxy",
           "the proxied call to a granted route's third-party target: no qits service",
           "eu.wohlben.qits.egress.proxy.ProxyClients",
-          "builds the proxy's upstream client");
+          "builds the proxy's upstream client",
+          "eu.wohlben.qits.egress.proxy.WebSocketSplice",
+          "a granted route's WebSocket handshake to its third-party target: no qits service");
 
   private static final JavaClasses PRODUCTION =
       new ClassFileImporter()
