@@ -1,0 +1,173 @@
+package eu.wohlben.qits.egress.identity;
+
+import io.vertx.core.json.JsonArray;
+import io.vertx.core.json.JsonObject;
+import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.PublicKey;
+import java.security.Signature;
+import java.time.Instant;
+import java.util.Base64;
+import java.util.Collection;
+
+/**
+ * One compact JWS, split into the parts a validator needs, plus the checks it makes — copied from
+ * qits-edge's {@code SignedJwt}, which the proxy listener's caller identity shares. Framework-free on
+ * purpose: the proxy listener is a plain Vert.x server, outside quarkus-oidc's reach, so a bearer
+ * presented there is validated here, offline, against the idp's JWKS ({@link IdpKeys}).
+ *
+ * @param kid the {@code kid} header — which published key signed this
+ * @param algorithm the {@code alg} header; only {@code RS256} is accepted
+ * @param claims the payload, verbatim
+ * @param signed the bytes the signature covers: {@code <header>.<payload>}, ASCII, as they arrived
+ * @param signature the decoded signature
+ */
+public record SignedJwt(
+    String kid, String algorithm, JsonObject claims, byte[] signed, byte[] signature) {
+
+  /** The one algorithm the idp signs with, and so the one this accepts. */
+  public static final String RS256 = "RS256";
+
+  /**
+   * Split a compact serialization.
+   *
+   * @throws IllegalArgumentException on anything that is not three base64url parts of JSON. The
+   *     caller turns that into a 401 — a malformed token is an unauthenticated caller, never a 500.
+   */
+  public static SignedJwt parse(String compact) {
+    if (compact == null || compact.isBlank()) {
+      throw new IllegalArgumentException("no token");
+    }
+    String[] parts = compact.split("\\.", -1);
+    if (parts.length != 3) {
+      throw new IllegalArgumentException(
+          "a JWT has three dot-separated parts, not " + parts.length);
+    }
+    JsonObject header = json(parts[0], "header");
+    JsonObject claims = json(parts[1], "payload");
+    byte[] signature = decode(parts[2], "signature");
+    return new SignedJwt(
+        header.getString("kid"),
+        header.getString("alg"),
+        claims,
+        (parts[0] + "." + parts[1]).getBytes(StandardCharsets.US_ASCII),
+        signature);
+  }
+
+  /**
+   * Whether this token was signed by that key. False rather than an exception for a bad signature;
+   * a key that cannot verify at all is a configuration problem and throws.
+   */
+  public boolean signatureMatches(PublicKey key) {
+    try {
+      Signature verifier = Signature.getInstance("SHA256withRSA");
+      verifier.initVerify(key);
+      verifier.update(signed);
+      return verifier.verify(signature);
+    } catch (GeneralSecurityException e) {
+      throw new IllegalStateException("SHA256withRSA is not usable in this JVM", e);
+    }
+  }
+
+  /**
+   * What is wrong with the claims, or null when nothing is. Signature is NOT checked here — that
+   * needs a key, and the key is chosen by {@link #kid()}.
+   *
+   * @param issuers the {@code iss} values an accepted token may carry, each compared exactly
+   * @param audience the audience the token must name
+   * @param now the moment to judge {@code exp} against
+   * @param clockSkewSeconds how far the two clocks may disagree
+   */
+  public String problem(
+      Collection<String> issuers, String audience, Instant now, long clockSkewSeconds) {
+    String problem = problem(issuers, now, clockSkewSeconds);
+    if (problem != null) {
+      return problem;
+    }
+    return audiences().contains(audience) ? null : "the token is not for " + audience;
+  }
+
+  /**
+   * The same checks WITHOUT the audience one — everything a token is or is not on its own, before
+   * anybody asks what it is for.
+   *
+   * <p>Split out because a credential validated at the edge is cached, and what is cached is the
+   * token's OWN soundness plus the audiences it named; the audience check is then made against that
+   * cached list on every request.
+   *
+   * @param issuers the {@code iss} values an accepted token may carry, each compared exactly
+   * @param now the moment to judge {@code exp} against
+   * @param clockSkewSeconds how far the two clocks may disagree
+   */
+  public String problem(Collection<String> issuers, Instant now, long clockSkewSeconds) {
+    if (!RS256.equals(algorithm)) {
+      // Refusing `none` is the point, and refusing every other alg with it is the cheap way to do
+      // it: an accepted algorithm the idp never signs with is an accepted algorithm we do not
+      // check.
+      return "the token is not " + RS256;
+    }
+    if (kid == null || kid.isBlank()) {
+      return "the token names no signing key";
+    }
+    // Null-checked first: an immutable collection's contains(null) throws rather than answering.
+    String iss = claims.getString("iss");
+    if (iss == null || !issuers.contains(iss)) {
+      return "the token was not issued by " + String.join(" or ", issuers);
+    }
+    Long expiry = number(claims.getValue("exp"));
+    if (expiry == null) {
+      return "the token does not expire";
+    }
+    if (now.getEpochSecond() > expiry + clockSkewSeconds) {
+      return "the token expired";
+    }
+    return null;
+  }
+
+  /** When this token expires, or null when it names no {@code exp}. */
+  public Instant expiry() {
+    Long expiry = number(claims.getValue("exp"));
+    return expiry == null ? null : Instant.ofEpochSecond(expiry);
+  }
+
+  /**
+   * The {@code groups} claim — the roles idp minted, which every service's OIDC mechanism reads as
+   * the permission. One string or an array, like {@code aud}; absent is no roles.
+   */
+  public JsonArray roles() {
+    Object groups = claims.getValue("groups");
+    if (groups instanceof JsonArray array) {
+      return array;
+    }
+    return groups == null ? new JsonArray() : new JsonArray().add(groups);
+  }
+
+  /** The {@code aud} claim, which JWT allows to be one string or an array of them. */
+  public JsonArray audiences() {
+    Object aud = claims.getValue("aud");
+    if (aud instanceof JsonArray array) {
+      return array;
+    }
+    return aud == null ? new JsonArray() : new JsonArray().add(aud);
+  }
+
+  private static Long number(Object value) {
+    return value instanceof Number n ? n.longValue() : null;
+  }
+
+  private static JsonObject json(String part, String what) {
+    try {
+      return new JsonObject(new String(decode(part, what), StandardCharsets.UTF_8));
+    } catch (RuntimeException e) {
+      throw new IllegalArgumentException("the " + what + " is not JSON");
+    }
+  }
+
+  private static byte[] decode(String part, String what) {
+    try {
+      return Base64.getUrlDecoder().decode(part);
+    } catch (IllegalArgumentException e) {
+      throw new IllegalArgumentException("the " + what + " is not base64url");
+    }
+  }
+}

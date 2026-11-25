@@ -311,6 +311,210 @@
         "status": 200
       },
       "type": "Synchronous/HTTP"
+    },
+    {
+      "comments": {
+        "references": {
+          "qits-call": {
+            "app": "qits-idp-service",
+            "operationId": "introspectToken"
+          },
+          "qits-trigger": {
+            "app": "qits-egress-service",
+            "call": "the proxy listener (8081): a caller presenting qits_tok_",
+            "kind": "call"
+          }
+        }
+      },
+      "description": "the proxy listener (8081): a caller presenting qits_tok_: introspectToken",
+      "key": "6cbbe4c5",
+      "pending": false,
+      "providerStates": [
+        {
+          "name": "a commissioned token",
+          "params": {
+            "authorization": "Basic dGVzdC1icm9hZDp0ZXN0LWJyb2FkLXNlY3JldA==",
+            "callerClientId": "test-broad",
+            "token": "qits_tok_0000000000000000000000000000000000000000001",
+            "tokenId": "00000000-0000-4000-8000-000000000001"
+          }
+        }
+      ],
+      "request": {
+        "body": {
+          "content": {
+            "token": "qits_tok_0000000000000000000000000000000000000000001"
+          },
+          "contentType": "application/json",
+          "encoded": false
+        },
+        "generators": {
+          "body": {
+            "$.token": {
+              "dataType": "STRING",
+              "expression": "${token}",
+              "type": "ProviderState"
+            }
+          },
+          "header": {
+            "Authorization": {
+              "dataType": "RAW",
+              "expression": "${authorization}",
+              "type": "ProviderState"
+            }
+          }
+        },
+        "headers": {
+          "Authorization": [
+            "Basic dGVzdC1icm9hZDp0ZXN0LWJyb2FkLXNlY3JldA=="
+          ],
+          "Content-Type": [
+            "application/json"
+          ]
+        },
+        "matchingRules": {
+          "body": {
+            "$.token": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        },
+        "method": "POST",
+        "path": "/idp/api/tokens/introspect"
+      },
+      "response": {
+        "body": {
+          "content": {
+            "accessToken": "opaque",
+            "expiresIn": 300
+          },
+          "contentType": "application/json",
+          "encoded": false
+        },
+        "headers": {
+          "Content-Type": [
+            "application/json"
+          ]
+        },
+        "matchingRules": {
+          "body": {
+            "$.accessToken": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.expiresIn": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "number"
+                }
+              ]
+            }
+          },
+          "header": {
+            "Content-Type": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "application/json.*"
+                }
+              ]
+            }
+          }
+        },
+        "status": 200
+      },
+      "type": "Synchronous/HTTP"
+    },
+    {
+      "comments": {
+        "references": {
+          "qits-call": {
+            "app": "qits-idp-service",
+            "operationId": "introspectToken"
+          },
+          "qits-trigger": {
+            "app": "qits-egress-service",
+            "call": "the proxy listener (8081): a caller presenting qits_tok_",
+            "kind": "call"
+          }
+        }
+      },
+      "description": "the proxy listener (8081): a caller presenting qits_tok_: introspectToken",
+      "key": "348972a0",
+      "pending": false,
+      "providerStates": [
+        {
+          "name": "a commissioned token that was deleted",
+          "params": {
+            "authorization": "Basic dGVzdC1icm9hZDp0ZXN0LWJyb2FkLXNlY3JldA==",
+            "callerClientId": "test-broad",
+            "token": "qits_tok_0000000000000000000000000000000000000000001",
+            "tokenId": "00000000-0000-4000-8000-000000000001"
+          }
+        }
+      ],
+      "request": {
+        "body": {
+          "content": {
+            "token": "qits_tok_0000000000000000000000000000000000000000001"
+          },
+          "contentType": "application/json",
+          "encoded": false
+        },
+        "generators": {
+          "body": {
+            "$.token": {
+              "dataType": "STRING",
+              "expression": "${token}",
+              "type": "ProviderState"
+            }
+          },
+          "header": {
+            "Authorization": {
+              "dataType": "RAW",
+              "expression": "${authorization}",
+              "type": "ProviderState"
+            }
+          }
+        },
+        "headers": {
+          "Authorization": [
+            "Basic dGVzdC1icm9hZDp0ZXN0LWJyb2FkLXNlY3JldA=="
+          ],
+          "Content-Type": [
+            "application/json"
+          ]
+        },
+        "matchingRules": {
+          "body": {
+            "$.token": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        },
+        "method": "POST",
+        "path": "/idp/api/tokens/introspect"
+      },
+      "response": {
+        "status": 404
+      },
+      "type": "Synchronous/HTTP"
     }
   ],
   "metadata": {

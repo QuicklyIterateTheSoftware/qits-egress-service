@@ -12,6 +12,8 @@ import eu.wohlben.qits.pact.consumer.GoldenInteraction;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
+import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.TreeSet;
@@ -23,16 +25,17 @@ import org.junit.jupiter.api.Test;
  * off the code rather than listed by hand:
  *
  * <ul>
- *   <li>no production class reaches a way to dial out — {@code java.net.http.HttpClient}, {@code
- *       HttpURLConnection}, a Vert.x {@code WebClient} or {@code HttpClient}, or {@code
- *       quarkus-oidc-client}'s {@code OidcClient}. The scaffold dials nothing itself; the proxy
- *       (qits-2620) brings its upstream client and its idp calls, and names them here with their
- *       pact rows;
+ *   <li>only the classes in {@link #DIALLERS} reach a way to dial out — {@code
+ *       java.net.http.HttpClient}, {@code HttpURLConnection}, a Vert.x {@code WebClient} or {@code
+ *       HttpClient}, or {@code quarkus-oidc-client}'s {@code OidcClient} — and each one's calls are
+ *       named there with the rows that cover them;
  *   <li>the named client {@code qits} is the only client-credentials mint, and its mint is rowed;
  *       the tenant's discovery and JWKS reads are rowed.
  * </ul>
  *
- * <p>Not seen here, because a library makes them: the OTLP export.
+ * <p>Not seen here, because a library makes them: the OTLP export. Not a qits service, so no pact:
+ * the proxy's upstream calls, which go to the third parties the grant table names (a {@code
+ * platform:} route's call to a platform service comes with qits-2623, and its row with it).
  *
  * <p>THIS SERVICE IS PUBLIC: it can reach public platform services only. qits-projects,
  * qits-deployments, qits-ci and every other {@code exposure: private} service are unreachable from
@@ -49,23 +52,54 @@ class OutboundCallGuardTest {
           "io.quarkus.oidc.client.OidcClient",
           "io.quarkus.oidc.client.OidcClients");
 
+  /** Who may dial, and what each one's calls are. */
+  static final Map<String, String> DIALLERS =
+      Map.of(
+          "eu.wohlben.qits.egress.identity.CallerIdentity",
+          "builds the idp client IdpKeys and IdpIntrospection share",
+          "eu.wohlben.qits.egress.identity.IdpKeys",
+          "qits-idp getOpenIdConfiguration and getJwks (IdpPactTest DISCOVERY, JWKS)",
+          "eu.wohlben.qits.egress.identity.IdpIntrospection",
+          "qits-idp introspectToken (IdpPactTest INTROSPECT, INTROSPECT_DELETED)",
+          "eu.wohlben.qits.egress.proxy.EgressProxy",
+          "the proxied call to a granted route's third-party target: no qits service",
+          "eu.wohlben.qits.egress.proxy.ProxyClients",
+          "builds the proxy's upstream client");
+
   private static final JavaClasses PRODUCTION =
       new ClassFileImporter()
           .withImportOption(new ImportOption.DoNotIncludeTests())
           .importPackages("eu.wohlben.qits.egress");
 
   @Test
-  void noProductionClassDialsAnotherService() {
+  void onlyTheNamedClassesDial() {
+    String allowed =
+        "("
+            + DIALLERS.keySet().stream()
+                .map(name -> name.replace(".", "\\."))
+                .collect(Collectors.joining("|"))
+            + ")(\\$.*)?";
     noClasses()
+        .that()
+        .haveNameNotMatching(allowed)
         .should()
         .dependOnClassesThat()
         .haveNameMatching(
             DIAL_OUT.stream().map(name -> name.replace(".", "\\.")).collect(Collectors.joining("|")))
         .because(
             "an outbound call to another qits service has a pact row against that provider's"
-                + " golden masters (qits-1149)")
+                + " golden masters (qits-1149): a new dialler joins DIALLERS with its rows")
         .allowEmptyShould(true)
         .check(PRODUCTION);
+  }
+
+  @Test
+  void theProxysIdpCallsAreRowed() {
+    Set<String> rowed =
+        IdpPactTest.PACT.rows().stream().map(GoldenInteraction::operationId).collect(Collectors.toSet());
+    for (String operation : List.of("getOpenIdConfiguration", "getJwks", "introspectToken")) {
+      assertTrue(rowed.contains(operation), "the proxy listener's identity calls " + operation);
+    }
   }
 
   @Test

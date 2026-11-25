@@ -44,6 +44,8 @@ public class EgressReadinessIT {
 
   static final String SERVICE = "qits-egress";
 
+  static final String ENFORCED_SLUG = "qits-deployments-pushes-the-grant-table-and-the-gateway-enforces-it";
+
   /**
    * The packaged process's environment: the {@code QITS_RESOURCE_DB_*} triple on this JVM's
    * embedded postgres, the gate on, the idp moved to the mock, telemetry dark and no shutdown delay.
@@ -62,9 +64,29 @@ public class EgressReadinessIT {
       overrides.put("QITS_RESOURCE_DB_PASSWORD", EmbeddedPg.PASSWORD);
       overrides.put("qits.auth.machine.required", "true");
       overrides.put("quarkus.oidc.auth-server-url", idp.baseUrl());
+      // The proxy listener's own validation (discovery, JWKS) reads the same mock, on a free port.
+      overrides.put("qits.egress.idp.url", idp.baseUrl());
+      overrides.put("qits.egress.proxy.port", String.valueOf(proxyPort()));
       overrides.put("quarkus.otel.sdk.disabled", "true");
       overrides.put("quarkus.shutdown.delay", "0s");
       return overrides;
+    }
+
+    static final String PROXY_PORT_PROPERTY = "qits.test.userflow-it.proxy-port";
+
+    /** The proxy listener's port: chosen free once per JVM, whichever loader asks. */
+    static synchronized int proxyPort() {
+      String parked = System.getProperty(PROXY_PORT_PROPERTY);
+      if (parked != null) {
+        return Integer.parseInt(parked);
+      }
+      try (java.net.ServerSocket socket = new java.net.ServerSocket(0)) {
+        int port = socket.getLocalPort();
+        System.setProperty(PROXY_PORT_PROPERTY, String.valueOf(port));
+        return port;
+      } catch (java.io.IOException e) {
+        throw new java.io.UncheckedIOException(e);
+      }
     }
 
     /** One url per JVM, parked in a system property for the other classloaders. */
@@ -122,11 +144,87 @@ public class EgressReadinessIT {
     story.note("the signing keys were fetched at startup").as("jwks-fetched");
   }
 
+  @UserStory(
+      value = "qits-deployments pushes the grant table and the gateway enforces it",
+      category = CATEGORY)
+  @UserStoryDescription(
+      """
+      Until qits-deployments pushes a grant table, the gateway refuses every call with 503. The push
+      (PUT /egress/api/grant-table) is admitted for the deployer's own service client only: another
+      platform service holding qits:system is refused. Once a table is held, a caller the table
+      grants nothing to, such as an agent, is refused with 403, and the gateway never dials out.
+      """)
+  @Test
+  void theDeployerPushesAndTheGatewayEnforces(Interactions story) {
+    MockIdp idp = MockIdp.attach();
+    String agent =
+        idp.token()
+            .subject("tok-project-agent-qits-developer")
+            .audience("qits-platform")
+            .groups("qits:agent")
+            .claim("agent", "developer")
+            .mint();
+
+    given()
+        .port(PackagedWithMockIdp.proxyPort())
+        .header("Authorization", "Bearer " + agent)
+        .get("/hetzner/v1/zones")
+        .then()
+        .statusCode(503)
+        .body("error", equalTo("no grant table yet"));
+    story.note("before any push, the gateway answers 503 no grant table yet").as("no-table");
+
+    String table =
+        "{\"version\":1764061200000,\"routes\":[{\"application\":\"qits-edge\","
+            + "\"environment\":\"dev\",\"deployedVersion\":\"2026.1201.101010\","
+            + "\"name\":\"hetzner\",\"target\":\"https://api.hetzner.cloud\","
+            + "\"secret\":\"HETZNER_DNS\",\"inject\":\"bearer\","
+            + "\"methods\":[\"GET\",\"POST\"]}],\"refused\":[]}";
+    given()
+        .header("Authorization", "Bearer " + serviceToken(idp, "dev-qits-edge"))
+        .contentType("application/json")
+        .body(table)
+        .put("/egress/api/grant-table")
+        .then()
+        .statusCode(403);
+    story.note("another platform service's client cannot push a table").as("foreign-refused");
+
+    given()
+        .header("Authorization", "Bearer " + serviceToken(idp, "dev-qits-deployments"))
+        .contentType("application/json")
+        .body(table)
+        .put("/egress/api/grant-table")
+        .then()
+        .statusCode(204);
+    story.note("qits-deployments' own client pushes the table").as("pushed");
+
+    given()
+        .port(PackagedWithMockIdp.proxyPort())
+        .header("Authorization", "Bearer " + agent)
+        .get("/hetzner/v1/zones")
+        .then()
+        .statusCode(403)
+        .body("error", equalTo("no grant"))
+        .body("principal", equalTo("agent:developer"));
+    story.note("an agent holds no route: 403 no grant").as("agent-refused");
+  }
+
+  /** A platform service's own client token, as qits-idp mints it. */
+  private static String serviceToken(MockIdp idp, String clientId) {
+    return idp.token()
+        .subject(clientId)
+        .audience("qits-platform")
+        .groups("clients/" + clientId, "qits:system")
+        .mint();
+  }
+
   @AfterAll
   static void theStoryReportIsComplete() {
     ReportAssertions.assertComplete(CATEGORY, READY_SLUG, UserflowReport.PASSED);
     ReportAssertions.assertEdge(
         CATEGORY, READY_SLUG, "http", SERVICE, MockIdp.SERVICE_NAME, "GET /idp/jwks -> 200");
     ReportAssertions.assertStepId(CATEGORY, READY_SLUG, "jwks-fetched");
+    ReportAssertions.assertComplete(CATEGORY, ENFORCED_SLUG, UserflowReport.PASSED);
+    ReportAssertions.assertStepId(CATEGORY, ENFORCED_SLUG, "agent-refused");
   }
 }

@@ -29,8 +29,11 @@ import org.junit.jupiter.api.Test;
  *       exporters ({@code IdpTokenMintPactTest} runs it through the real oidc client).
  * </ul>
  *
- * <p>The proxy's own idp calls (introspection, qits-2620; token exchange, qits-2623) join this pact
- * with the code that makes them.
+ * <p>The proxy listener's own idp calls (qits-2620): its caller identity reads the same discovery
+ * document and JWKS (the rows above serve both), and introspects an opaque {@code qits_tok_} caller
+ * with this service's own Basic pair — {@link #INTROSPECT} and {@link #INTROSPECT_DELETED}, run by
+ * {@code IdpIntrospectionPactTest}. The token exchange (qits-2623) joins with the code that makes
+ * it.
  *
  * <p>The pact is {@code pacts/qits-egress-service_qits-idp-service.json}; {@code
  * -Dgolden.update=true} rewrites it.
@@ -68,7 +71,29 @@ class IdpPactTest {
           .header("Authorization", "{authorization}")
           .consumes("access_token", "expires_in");
 
-  static final ConsumerPact PACT = ConsumerPact.of(CONSUMER, IDP, MINT, DISCOVERY, JWKS);
+  /** What makes the proxy listener ask: a caller presenting an opaque token. */
+  static final Trigger OPAQUE_CALLER =
+      Trigger.of("call", "call", "the proxy listener (8081): a caller presenting qits_tok_");
+
+  /** The qits-idp state of a live commissioned token, asked about with a client's Basic pair. */
+  static final String A_COMMISSIONED_TOKEN = "a commissioned token";
+
+  /** The same token after its deletion: idp's 404. */
+  static final String A_COMMISSIONED_TOKEN_THAT_WAS_DELETED = "a commissioned token that was deleted";
+
+  /** The token stands for a JWT, with its remaining life. */
+  static final GoldenInteraction INTROSPECT =
+      GoldenInteraction.of(OPAQUE_CALLER, A_COMMISSIONED_TOKEN, "introspectToken")
+          .header("Authorization", "{authorization}")
+          .consumes("accessToken", "expiresIn");
+
+  /** A deleted token: the status is the whole verdict, the body is not read. */
+  static final GoldenInteraction INTROSPECT_DELETED =
+      GoldenInteraction.of(OPAQUE_CALLER, A_COMMISSIONED_TOKEN_THAT_WAS_DELETED, "introspectToken")
+          .header("Authorization", "{authorization}");
+
+  static final ConsumerPact PACT =
+      ConsumerPact.of(CONSUMER, IDP, MINT, DISCOVERY, JWKS, INTROSPECT, INTROSPECT_DELETED);
 
   private static final ObjectMapper JSON = new ObjectMapper();
 
