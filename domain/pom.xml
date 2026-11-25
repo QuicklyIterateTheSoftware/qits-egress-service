@@ -6,7 +6,7 @@
     <parent>
         <groupId>eu.wohlben.qits</groupId>
         <artifactId>qits-egress</artifactId>
-        <version>2026.1125.160731</version>
+        <version>2026.1125.175643</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
     <!-- The domain: the egress database, its own named datasource and its Flyway lineage
