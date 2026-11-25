@@ -52,6 +52,15 @@ public class GrantIndex {
       Map<String, GrantRoute> granted = routes.get(application);
       return granted == null ? null : granted.get(name);
     }
+
+    /** Every route granted to {@code application}, in no particular order; empty for none. */
+    public java.util.Collection<GrantRoute> routes(String application) {
+      if (application == null) {
+        return java.util.List.of();
+      }
+      Map<String, GrantRoute> granted = routes.get(application);
+      return granted == null ? java.util.List.of() : granted.values();
+    }
   }
 
   @Inject GrantTableStore store;
@@ -65,6 +74,10 @@ public class GrantIndex {
 
   @ConfigProperty(name = "qits.egress.test.allow-plain-http", defaultValue = "false")
   boolean allowPlainHttp;
+
+  /** Where {@code platform:<label>} goes: {@code https://{label}.qits.${QITS_DOMAIN}}. */
+  @ConfigProperty(name = "qits.egress.platform.origin")
+  String platformOrigin;
 
   private volatile Table current;
 
@@ -135,7 +148,7 @@ public class GrantIndex {
         .held()
         .ifPresentOrElse(
             row -> {
-              current = index(parse(row.body()), allowPlainHttp);
+              current = index(parse(row.body()), allowPlainHttp, platformOrigin);
               LOG.infof("enforcing %s", describe(current));
             },
             () -> current = null);
@@ -150,7 +163,7 @@ public class GrantIndex {
     if (known != null && known.version() >= table.version()) {
       return;
     }
-    current = index(table, allowPlainHttp);
+    current = index(table, allowPlainHttp, platformOrigin);
     LOG.infof("enforcing %s", describe(current));
   }
 
@@ -169,13 +182,18 @@ public class GrantIndex {
    * Package-visible and static so it is asserted alone.
    */
   static Table index(GrantTableWire.GrantTable table, boolean allowPlainHttp) {
+    return index(table, allowPlainHttp, GrantRoute.DEFAULT_PLATFORM_ORIGIN);
+  }
+
+  public static Table index(
+      GrantTableWire.GrantTable table, boolean allowPlainHttp, String platformOrigin) {
     Map<String, Map<String, GrantRoute>> routes = new HashMap<>();
     for (GrantTableWire.Route route : table.routes()) {
       if (route.application() == null || route.name() == null) {
         LOG.warnf("table %d: a route without an application or a name is dropped", table.version());
         continue;
       }
-      GrantRoute compiled = GrantRoute.of(route, allowPlainHttp);
+      GrantRoute compiled = GrantRoute.of(route, allowPlainHttp, platformOrigin);
       if (compiled.problem() != null) {
         LOG.warnf(
             "table %d: route %s of %s cannot be served: %s",

@@ -26,7 +26,7 @@ The application is `qits-egress`, image `qits/qits-egress`, two replicas.
 | Port | What | Reached by |
 |---|---|---|
 | 8080 | Quarkus HTTP, the **management** listener: `/egress/api` (the grant-table door) and `/egress/q` (health) | `https://egress.qits.<domain>/egress` through the **public** edge; the deployer's healthcheck at `/egress/q/health/ready` |
-| 8081 | Vert.x server (HTTP/1.1, no h2c), the **proxy**: gateway form `/<route>/<rest>` (qits-2620), streams, WebSockets, scrubbing and the drain (qits-2621); absolute-form `HTTPS_PROXY` requests and `CONNECT` come with qits-2622 | `http://${QITS_ENVIRONMENT}-qits-egress:8081`, the wire alias on qits-net only; no edge routes it |
+| 8081 | Vert.x server (HTTP/1.1, no h2c), the **proxy**: gateway form `/<route>/<rest>` (qits-2620), streams, WebSockets, scrubbing and the drain (qits-2621), absolute-form `HTTP(S)_PROXY` requests and `CONNECT` (qits-2622) | `http://${QITS_ENVIRONMENT}-qits-egress:8081`, the wire alias on qits-net only; no edge routes it |
 
 ## The grant table is pushed, not pulled
 
@@ -69,7 +69,15 @@ route name) → route`, compiled once (target, injection), replaced whole.
 
 ## The gateway (8081)
 
-`/<route>/<rest>?<query>`, one call in this order (`proxy/EgressProxy`):
+Three request forms, one path through identity, grant, injection, scrubbing and audit:
+
+| Form | Request | Caller from | Route |
+|---|---|---|---|
+| gateway | `GET /<route>/<rest>?<query>` | `Authorization: Bearer` (401 + `WWW-Authenticate`) | by name |
+| absolute | `GET https://host/path` or `GET http://host/path` sent to the proxy (`HTTP_PROXY`/`HTTPS_PROXY` clients) | `Proxy-Authorization` (407 + `Proxy-Authenticate: Basic realm="qits-egress"`) | by origin and base path |
+| tunnel | `CONNECT host:port` (443 when left out) | `Proxy-Authorization` (407) | a route whose target is that host:port and whose `methods` hold `CONNECT` |
+
+The gateway form, one call in this order (`proxy/EgressProxy`):
 
 1. **Caller** from `Authorization: Bearer` (`identity/CallerIdentity`): a JWT is validated offline
    (RS256, a `kid` of the idp's JWKS, the issuer of the idp's discovery, `exp`, `aud` holding
@@ -91,6 +99,32 @@ route name) → route`, compiled once (target, injection), replaced whole.
    <secret>`; `inject: header:<Name>` → `<Name>: <secret>`. `Accept-Encoding: identity`, so the
    answer can be scrubbed.
 7. **Back**, scrubbed (below), streamed as it arrives.
+
+### HTTPS_PROXY clients (absolute-form and CONNECT)
+
+A client configured with `HTTPS_PROXY=http://<any user>:<bearer>@${QITS_ENVIRONMENT}-qits-egress:8081`
+(or `HTTP_PROXY`) reaches the gateway without knowing its route names:
+
+- **`Proxy-Authorization`** (`proxy/ProxyCredential`) is `Basic base64(<any user>:<bearer>)` — the
+  user is ignored, the password is the bearer — or `Bearer <bearer>`. The bearer then goes through
+  the same `CallerIdentity` (JWT offline, `qits_tok_` introspected). Missing, unreadable or refused:
+  **407** with `Proxy-Authenticate: Basic realm="qits-egress"`, so a client that holds the
+  credential sends it on the second try (the JDK does).
+- **Absolute-form** (`proxy/AbsoluteTarget`): the caller's granted route whose target ORIGIN is the
+  request's — scheme, host, port with each scheme's default — and whose base path prefixes the
+  path on a segment boundary; of several, the longest base path. A platform route's origin is
+  `https://<label>.qits.${QITS_DOMAIN}`. Because a proxy client tunnels every `https://` URL with
+  `CONNECT` (nothing can be injected into a tunnel), `http://host[:80]/…` also matches a route
+  `https://host[:443]`: the client sends plain http on qits-net, and the gateway is the TLS client —
+  nothing leaves in plain http that the route did not declare. Then the same method check,
+  injection, scrubbing and audit as the gateway form, the upstream path being the request's own.
+  No route: **403** `{"error":"no grant","principal","route","method","target"}`.
+- **`CONNECT host:port`** (`proxy/ConnectTunnel`): only for a route whose target is that host and
+  port and whose `methods` hold `CONNECT`, never a platform route. The gateway dials the target,
+  answers `200` and splices the bytes both ways with back-pressure; nothing is injected or
+  scrubbed (the bytes are the caller's own TLS). A route that reaches the host:port without
+  `CONNECT`, or none at all: **403**. A tunnel needs only a target: a `CONNECT`-only route may name
+  no secret. Audit: `method=CONNECT path=- status=200`, written when the tunnel closes.
 
 ### Streams and WebSockets
 
@@ -142,7 +176,8 @@ the connection closes:
 
 `status` is the upstream's for an allowed call and the gateway's own otherwise. Reasons:
 `no-credentials`, `bad-credentials`, `idp-unreachable`, `no-table`, `no-route`, `bad-path`,
-`no-grant`, `method-not-granted`, `platform-route`, `bad-route`, `no-secret`, and on an ALLOW
+`no-grant`, `method-not-granted`, `platform-route`, `bad-route`, `no-secret`, `bad-target` (an
+absolute-form or `CONNECT` target that does not parse), and on an ALLOW
 `upstream-unreachable` when the proxy answered 502 itself, `upstream-encoded` when a secret route's
 answer was encoded and refused, `websocket` for a spliced socket (written at its close, status 101). Never a header value, a query value, a
 body or a secret; caller-influenced values are reduced to a safe alphabet.

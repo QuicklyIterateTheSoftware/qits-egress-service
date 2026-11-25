@@ -28,7 +28,8 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
   - `identity/` the proxy listener's caller identity (`CallerIdentity`, `IdpKeys`, `SignedJwt`,
     `IdpIntrospection`, `Principal`), copied from qits-edge and adapted;
   - `proxy/` the 8081 listener (`EgressProxy`), what leaves for the upstream (`EgressOutbound`),
-    the audit line (`AuditLine`), the secrets (`SecretStore`), the scrubbing (`Scrubber`,
+    the audit line (`AuditLine`), the secrets (`SecretStore`), the HTTPS_PROXY forms
+    (`ProxyCredential`, `AbsoluteTarget`, `ConnectTunnel`), the scrubbing (`Scrubber`,
     `ScrubbingReadStream`, `ResponseScrub`), the exchanges in flight and the drain (`InFlight`),
     and the qits-edge copies (`EdgeHopByHop`, `EdgeRequestFraming`, `UpstreamRetry`,
     `UpstreamKeepAlive`, `UpstreamChannel`, `ProxyClients`, `UpstreamPools`/`UpstreamLease`/
@@ -53,8 +54,12 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
   no pact; a `platform:` route's call (qits-2623) brings its row.
 - **The proxy listener is not Quarkus HTTP.** Nothing on 8081 passes quarkus-oidc, the security
   layer or a JAX-RS filter: every check is in `proxy/EgressProxy`, and every refusal it writes is
-  JSON and audited. A new request form (qits-2622) goes through the same `CallerIdentity` and the
-  same audit line.
+  JSON and audited. Every request form (`EgressProxy.Form`: gateway, absolute, CONNECT) goes
+  through the same `CallerIdentity` and the same audit line; the proxy forms answer 407, never
+  401, for a missing or bad credential.
+- **A route matched by origin is matched exactly** (`AbsoluteTarget.match`): scheme, host and port,
+  with the single `http:80 → https:443` allowance. Never widen it to "any port" or a host suffix: a
+  caller could then reach what no route declares.
 - **Never forward an upgrade through `HttpProxy`'s own WebSocket path**: it skips the interceptors,
   so the caller's credentials would leave and no secret would be injected. It is off
   (`setSupportWebSocket(false)`); `WebSocketSplice` handshakes with the headers

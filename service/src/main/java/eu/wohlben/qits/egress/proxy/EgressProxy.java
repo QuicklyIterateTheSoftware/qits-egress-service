@@ -119,6 +119,8 @@ public class EgressProxy {
 
   private WebSocketSplice webSockets;
 
+  private ConnectTunnel tunnels;
+
   private final InFlight inFlight = new InFlight();
 
   private long checkTimer = -1;
@@ -127,6 +129,7 @@ public class EgressProxy {
     ordinary = pool(UpstreamPools.ORDINARY);
     stream = pool(UpstreamPools.STREAM);
     webSockets = new WebSocketSplice(stream.client(), stream.pools());
+    tunnels = new ConnectTunnel(vertx);
     checkTimer =
         vertx.setPeriodic(
             UpstreamPools.CHECK_INTERVAL_MS,
@@ -224,10 +227,36 @@ public class EgressProxy {
     return server.actualPort();
   }
 
+  /** The three request forms the listener takes. */
+  enum Form {
+    /** {@code /<route>/<rest>}, the caller from {@code Authorization}. */
+    GATEWAY,
+    /** {@code GET http(s)://host/path} from an {@code HTTP(S)_PROXY} client. */
+    ABSOLUTE,
+    /** {@code CONNECT host:port} from an {@code HTTPS_PROXY} client. */
+    CONNECT;
+
+    static Form of(HttpServerRequest request) {
+      if (request.method() == HttpMethod.CONNECT) {
+        return CONNECT;
+      }
+      return AbsoluteTarget.isAbsolute(request.uri()) ? ABSOLUTE : GATEWAY;
+    }
+  }
+
   void handle(HttpServerRequest request) {
     // Held until there is somewhere to send it: identifying the caller may ask idp.
     request.pause();
-    AuditLine audit = new AuditLine(request.method().name(), request.path());
+    Form form = Form.of(request);
+    AbsoluteTarget absolute = form == Form.ABSOLUTE ? AbsoluteTarget.parse(request.uri()) : null;
+    AuditLine audit =
+        new AuditLine(
+            request.method().name(),
+            switch (form) {
+              case GATEWAY -> request.path();
+              case ABSOLUTE -> absolute == null ? "-" : absolute.path();
+              case CONNECT -> "-";
+            });
     HttpServerResponse response = request.response();
     InFlight.Exchange exchange =
         inFlight.open(request, () -> audit.write(response.getStatusCode()));
@@ -235,12 +264,16 @@ public class EgressProxy {
       // The drain is over: the connection is closed unanswered, and the caller retries elsewhere.
       return;
     }
-    Gateway gateway = Gateway.parse(request.path());
+    Gateway gateway = form == Form.GATEWAY ? Gateway.parse(request.path()) : null;
     if (gateway != null) {
       audit.route(gateway.route());
     }
+    String credential =
+        form == Form.GATEWAY
+            ? request.getHeader(HttpHeaders.AUTHORIZATION)
+            : ProxyCredential.bearer(request.getHeader(HttpHeaders.PROXY_AUTHORIZATION));
     callers
-        .identify(request.getHeader(HttpHeaders.AUTHORIZATION))
+        .identify(credential)
         .onComplete(
             result -> {
               if (result.failed()) {
@@ -251,14 +284,25 @@ public class EgressProxy {
               }
               CallerIdentity.Verdict verdict = result.result();
               if (!verdict.admitted()) {
-                if (verdict.status() == 401) {
+                int status = verdict.status();
+                if (status == 401 && form == Form.GATEWAY) {
                   response.putHeader("WWW-Authenticate", "Bearer realm=\"qits-egress\"");
+                } else if (status == 401) {
+                  // A proxy client answers a 407 with its proxy credential; a 401 would be read as
+                  // the target's own.
+                  status = 407;
+                  response.putHeader(
+                      HttpHeaders.PROXY_AUTHENTICATE, "Basic realm=\"qits-egress\"");
                 }
-                refuse(request, audit, verdict.status(), verdict.reason(), error(verdict.message()));
+                refuse(request, audit, status, verdict.reason(), error(verdict.message()));
                 return;
               }
               audit.principal(verdict.principal());
-              route(request, audit, exchange, verdict, gateway);
+              switch (form) {
+                case GATEWAY -> route(request, audit, exchange, verdict, gateway);
+                case ABSOLUTE -> absolute(request, audit, exchange, verdict, absolute);
+                case CONNECT -> connect(request, audit, exchange, verdict);
+              }
             });
   }
 
@@ -294,15 +338,138 @@ public class EgressProxy {
           audit,
           403,
           route == null ? "no-grant" : "method-not-granted",
-          new JsonObject()
-              .put("error", "no grant")
-              .put("principal", verdict.principal().toString())
-              .put("route", gateway.route())
-              .put("method", method));
+          noGrant(verdict, gateway.route(), method));
       return;
     }
+    serve(
+        request,
+        audit,
+        exchange,
+        route,
+        upstreamPath(route.basePath(), gateway.rest()),
+        request.query());
+  }
+
+  /**
+   * An absolute-form request: the caller's granted route whose target origin is the request's and
+   * whose base path prefixes its path — the longest such base path — or 403.
+   */
+  private void absolute(
+      HttpServerRequest request,
+      AuditLine audit,
+      InFlight.Exchange exchange,
+      CallerIdentity.Verdict verdict,
+      AbsoluteTarget target) {
+    if (target == null) {
+      refuse(request, audit, 400, "bad-target", error("the request target is not an http(s) URL"));
+      return;
+    }
+    audit.target(target.host(), target.path());
+    GrantIndex.Table table = grants.current();
+    if (table == null) {
+      refuse(request, audit, 503, "no-table", error("no grant table yet"));
+      return;
+    }
+    if (!Gateway.safe(target.path())) {
+      refuse(request, audit, 400, "bad-path", error("a path with dot segments is refused"));
+      return;
+    }
+    String method = request.method().name();
+    GrantRoute route =
+        target.match(table.routes(verdict.principal().application()));
+    if (route == null || !route.methods().contains(method)) {
+      if (route != null) {
+        audit.route(route.name());
+      }
+      refuse(
+          request,
+          audit,
+          403,
+          route == null ? "no-grant" : "method-not-granted",
+          noGrant(verdict, route == null ? null : route.name(), method)
+              .put("target", target.origin()));
+      return;
+    }
+    audit.route(route.name());
+    serve(request, audit, exchange, route, target.path(), target.query());
+  }
+
+  /**
+   * {@code CONNECT host:port}: a tunnel, for a route whose target is that host and port and whose
+   * {@code methods} hold {@code CONNECT}. Nothing is injected — the bytes are the caller's TLS —
+   * and nothing is scrubbed; the audit line is {@code method=CONNECT path=-}, written when the
+   * tunnel closes.
+   */
+  private void connect(
+      HttpServerRequest request,
+      AuditLine audit,
+      InFlight.Exchange exchange,
+      CallerIdentity.Verdict verdict) {
+    ConnectTunnel.Authority authority = ConnectTunnel.Authority.parse(request.uri());
+    if (authority == null) {
+      refuse(request, audit, 400, "bad-target", error("CONNECT takes host:port"));
+      return;
+    }
+    audit.target(authority.host(), "-");
+    GrantIndex.Table table = grants.current();
+    if (table == null) {
+      refuse(request, audit, 503, "no-table", error("no grant table yet"));
+      return;
+    }
+    GrantRoute reached = null;
+    GrantRoute granted = null;
+    for (GrantRoute route : table.routes(verdict.principal().application())) {
+      if (!authority.reaches(route)) {
+        continue;
+      }
+      reached = route;
+      if (route.methods().contains("CONNECT")) {
+        granted = route;
+        break;
+      }
+    }
+    if (granted == null) {
+      if (reached != null) {
+        audit.route(reached.name());
+      }
+      refuse(
+          request,
+          audit,
+          403,
+          reached == null ? "no-grant" : "method-not-granted",
+          noGrant(verdict, reached == null ? null : reached.name(), "CONNECT")
+              .put("target", authority.toString()));
+      return;
+    }
+    audit.route(granted.name());
+    audit.allow();
+    tunnels.open(request, authority, exchange, audit);
+  }
+
+  /** The 403 body: who asked for what. */
+  private static JsonObject noGrant(CallerIdentity.Verdict verdict, String route, String method) {
+    return new JsonObject()
+        .put("error", "no grant")
+        .put("principal", verdict.principal().toString())
+        .put("route", route)
+        .put("method", method);
+  }
+
+  /**
+   * A granted route, its path decided: the route kind's own refusals, then out.
+   *
+   * @param path the upstream path, without the query
+   * @param query the raw query, or null
+   */
+  private void serve(
+      HttpServerRequest request,
+      AuditLine audit,
+      InFlight.Exchange exchange,
+      GrantRoute route,
+      String path,
+      String query) {
     if (route.isPlatform()) {
-      audit.target("platform:" + route.platform(), request.path());
+      audit.target("platform:" + route.platform(), path);
       refuse(request, audit, 501, "platform-route", error("platform routes not yet supported"));
       return;
     }
@@ -310,14 +477,12 @@ public class EgressProxy {
       refuse(request, audit, 502, "bad-route", error("the route cannot be served: " + route.problem()));
       return;
     }
-    String path = upstreamPath(route.basePath(), gateway.rest());
     audit.target(route.host(), path);
     String secret = secrets.value(route.secret()).orElse(null);
     if (secret == null) {
       refuse(request, audit, 502, "no-secret", error("secret not configured"));
       return;
     }
-    String query = request.query();
     String uri = query == null || query.isEmpty() ? path : path + "?" + query;
     audit.allow();
     forward(request, audit, exchange, route, uri, secret);

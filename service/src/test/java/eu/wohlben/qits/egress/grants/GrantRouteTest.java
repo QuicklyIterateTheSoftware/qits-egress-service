@@ -65,6 +65,32 @@ class GrantRouteTest {
     GrantRoute route = GrantRoute.of(route("self-check", "platform:projects", null, null), false);
     assertTrue(route.isPlatform());
     assertEquals("projects", route.platform());
+    assertNull(route.problem());
+    assertTrue(route.ssl());
+    assertEquals("projects.qits.wohlben.eu", route.host());
+    assertEquals(443, route.dialPort());
+    assertEquals("", route.basePath());
+  }
+
+  @Test
+  void aPlatformTargetIsThePlatformOriginOfItsLabel() {
+    GrantRoute route =
+        GrantRoute.of(
+            route("self-check", "platform:idp", null, null), true, "http://127.0.0.1:9/{label}");
+    assertEquals("127.0.0.1", route.host());
+    assertEquals(9, route.dialPort());
+    assertEquals("/idp", route.basePath());
+    assertNull(route.targetProblem());
+    assertNotNull(
+        GrantRoute.of(route("x", "platform:Bad.Label", null, null), false).problem(),
+        "a label is a plain DNS label");
+  }
+
+  @Test
+  void aConnectOnlyRouteHasADiallableTarget() {
+    GrantRoute route = GrantRoute.of(route("registry", "https://registry.example", null, null), false);
+    assertNotNull(route.problem(), "no secret, no injection: not servable as a call");
+    assertNull(route.targetProblem(), "but a tunnel needs only the target");
   }
 
   @Test
