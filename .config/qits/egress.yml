@@ -1,0 +1,16 @@
+# Routes qits-egress sends through its own proxy (epic qits-2524). Each route is a grant for
+# application:qits-egress, read by qits-deployments at this repository's released tag.
+#
+# tls-self-check: the egress's own proof that it ends TLS inside a CONNECT tunnel with a leaf the
+# platform CA (qits-certificates) issued. At startup, and after each anchor change, it CONNECTs to
+# its own listener for api.hetzner.cloud:443, handshakes trusting only the platform anchors, and
+# sends HEAD /v1/ (reads nothing). The route also makes the egress pre-issue a leaf for
+# api.hetzner.cloud. Its secret is the Hetzner DNS token the egress already holds for qits-edge's
+# route (QITS_EGRESS_SECRET_HETZNER_DNS).
+version: 1
+routes:
+  - name: tls-self-check
+    target: https://api.hetzner.cloud
+    secret: HETZNER_DNS
+    inject: bearer
+    methods: [CONNECT, HEAD]
