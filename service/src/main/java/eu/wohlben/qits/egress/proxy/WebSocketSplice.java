@@ -181,6 +181,12 @@ final class WebSocketSplice {
 
   /** Both directions with back-pressure; a close on either side closes the other. */
   static void splice(NetSocket inbound, NetSocket outbound, InFlight.Exchange exchange) {
+    splice(inbound, outbound, exchange, () -> {});
+  }
+
+  /** {@link #splice(NetSocket, NetSocket, InFlight.Exchange)}, running {@code onClose} on either close. */
+  static void splice(
+      NetSocket inbound, NetSocket outbound, InFlight.Exchange exchange, Runnable onClose) {
     pipe(inbound, outbound);
     pipe(outbound, inbound);
     inbound.exceptionHandler(failure -> outbound.close());
@@ -188,11 +194,13 @@ final class WebSocketSplice {
     inbound.closeHandler(
         v -> {
           outbound.close();
+          onClose.run();
           exchange.settle();
         });
     outbound.closeHandler(
         v -> {
           inbound.close();
+          onClose.run();
           exchange.settle();
         });
   }

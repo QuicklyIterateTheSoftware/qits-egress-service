@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.egress.tls.LeafDoor;
+import eu.wohlben.qits.egress.tls.TlsSelfCheck;
 import eu.wohlben.qits.pact.consumer.ConsumerPact;
 import eu.wohlben.qits.pact.consumer.GoldenInteraction;
 import eu.wohlben.qits.pact.consumer.GoldenMasters;
@@ -25,7 +26,9 @@ import org.junit.jupiter.api.Test;
 /**
  * <b>What this service asks qits-certificates-service</b>: one leaf per https target host ({@code
  * POST /certificates/api/leaves}, tls/LeafDoor), pre-issued when a grant table is adopted, renewed
- * at two thirds of its life, and asked inline by a CONNECT with no leaf.
+ * at two thirds of its life, and asked inline by a CONNECT with no leaf; and the published anchors
+ * ({@code GET /certificates/api/anchors} as JSON, tls/TlsSelfCheck), the only trust of the TLS
+ * self-check (qits-2644).
  *
  * <p>The row is driven through the real {@link LeafDoor#post} with the state's own CSR — the one the
  * provider recorded, since a CSR this process builds carries a fresh key and a fresh signature —
@@ -46,8 +49,15 @@ class CertificatesPactTest {
       GoldenInteraction.of(LEAF_NEEDED, "leaf issued", "issueLeaf")
           .consumes("certificate", "chain", "serial", "notAfter", "anchorId");
 
+  /** The self-check's anchors: each one's subject and certificate digest, and the version. */
+  static final GoldenInteraction ANCHORS_READ =
+      GoldenInteraction.of(LEAF_NEEDED, "one ACTIVE anchor", "getAnchors")
+          .header("Accept", "application/json")
+          .consumes("version", "anchors[].subject", "anchors[].sha256")
+          .anyLength("anchors");
+
   static final ConsumerPact PACT =
-      ConsumerPact.of(IdpPactTest.CONSUMER, CERTIFICATES, LEAF_ISSUED);
+      ConsumerPact.of(IdpPactTest.CONSUMER, CERTIFICATES, LEAF_ISSUED, ANCHORS_READ);
 
   @Test
   void aCsrIsAnsweredWithTheLeafAndItsChain() {
@@ -81,6 +91,28 @@ class CertificatesPactTest {
                     .anyMatch(name -> "api.example.org".equals(name.get(1))),
                 "the leaf names the csr's host");
             assertTrue(issued.serial().matches("[0-9a-f]+"), issued.serial());
+          } finally {
+            vertx.close();
+          }
+        });
+  }
+
+  @Test
+  void theSelfCheckReadsTheAnchorsDigestsAndSubjects() {
+    PACT.run(
+        ANCHORS_READ,
+        (url, recorded) -> {
+          Vertx vertx = Vertx.vertx();
+          try {
+            TlsSelfCheck.Anchors anchors =
+                TlsSelfCheck.anchors(vertx.createHttpClient(), url + "/certificates", 10_000)
+                    .toCompletableFuture()
+                    .get(20, TimeUnit.SECONDS);
+            assertEquals(1, anchors.anchors().size());
+            assertTrue(
+                anchors.anchors().values().iterator().next().startsWith("CN=qits platform CA"),
+                anchors.toString());
+            assertTrue(anchors.anchors().keySet().iterator().next().matches("[0-9a-f]{64}"));
           } finally {
             vertx.close();
           }

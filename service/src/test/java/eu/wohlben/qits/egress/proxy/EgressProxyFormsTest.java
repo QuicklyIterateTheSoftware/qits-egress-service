@@ -52,10 +52,10 @@ import org.junit.jupiter.api.Test;
 
 /**
  * <b>The HTTPS_PROXY forms</b> (qits-2622) through the real listener: {@code Proxy-Authorization},
- * absolute-form requests matched to a route by origin and base path, and {@code CONNECT} tunnels to
- * a local TCP echo (a plain {@code http://} route target, allowed by the suite's test flag). The
- * clients are a raw socket — exact bytes, the CONNECT handshake — the JDK's own proxy support, and
- * {@code curl -x} where the image has curl.
+ * absolute-form requests matched to a route by origin and base path (a plain {@code http://} route
+ * target, allowed by the suite's test flag), and the {@code CONNECT} refusals. The clients are a raw
+ * socket — exact bytes — the JDK's own proxy support, and {@code curl -x} where the image has curl.
+ * A granted {@code CONNECT} ends its TLS here: {@link EgressInterceptionTest} (qits-2644).
  */
 @QuarkusTest
 class EgressProxyFormsTest {
@@ -141,6 +141,7 @@ class EgressProxyFormsTest {
             List.of(
                 route("suite", target + "/base", "SUITE_UPSTREAM", "header:X-Api-Key", "GET", "POST"),
                 route("deeper", target + "/base/deeper", "SUITE_UPSTREAM", "bearer", "GET"),
+                // Plain http: a CONNECT never reaches it, CONNECT among its methods or not.
                 route("tunnel", "http://127.0.0.1:" + echo.actualPort(), null, null, "CONNECT")),
             List.of());
     store.clear();
@@ -419,57 +420,23 @@ class EgressProxyFormsTest {
   // --- CONNECT -----------------------------------------------------------------------------------
 
   @Test
-  void aConnectToAGrantedTunnelSplicesTheBytes() throws Exception {
-    try (Socket socket = new Socket("127.0.0.1", proxy.port())) {
-      socket.setSoTimeout(10_000);
-      OutputStream out = socket.getOutputStream();
-      out.write(
-          ("CONNECT 127.0.0.1:" + echo.actualPort() + " HTTP/1.1\r\nHost: 127.0.0.1:"
-                  + echo.actualPort() + "\r\nProxy-Authorization: " + basic(token()) + "\r\n\r\n")
-              .getBytes(StandardCharsets.ISO_8859_1));
-      out.flush();
-      InputStream in = socket.getInputStream();
-      Head head = head(in);
-      assertEquals(200, head.status());
-      byte[] ping = "ping through the tunnel\n".getBytes(StandardCharsets.UTF_8);
-      out.write(ping);
-      out.flush();
-      assertEquals(
-          "ping through the tunnel\n",
-          new String(in.readNBytes(ping.length), StandardCharsets.UTF_8),
-          "the echo answered through the tunnel, byte for byte");
-      assertEquals(1, proxy.inFlight(), "an open tunnel is a call in flight");
-    }
-    String line = auditLine();
-    assertTrue(
-        line.startsWith(
-            "egress decision=ALLOW principal=application:qits-edge route=tunnel method=CONNECT"
-                + " target=127.0.0.1 path=- status=200"),
-        line);
-    assertTrue(line.endsWith(" reason=-"), line);
-    long deadline = System.currentTimeMillis() + 5_000;
-    while (proxy.inFlight() > 0 && System.currentTimeMillis() < deadline) {
-      Thread.sleep(20);
-    }
-    assertEquals(0, proxy.inFlight());
-  }
-
-  @Test
   void aConnectWithoutAGrantIsForbidden() throws Exception {
-    // Two routes reach this host and port, neither with CONNECT among its methods; the refusal
-    // names the first by name.
+    // A plain-http route is never tunnelled — its TLS could not be ended — even one whose methods
+    // hold CONNECT.
     Answer answer =
         raw(
-            "CONNECT 127.0.0.1:" + upstream.actualPort() + " HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            "CONNECT 127.0.0.1:" + echo.actualPort() + " HTTP/1.1\r\nHost: 127.0.0.1\r\n"
                 + "Proxy-Authorization: " + basic(token()) + "\r\n\r\n");
     assertEquals(403, answer.head().status());
     JsonObject body = new JsonObject(answer.body());
     assertEquals("no grant", body.getString("error"));
     assertEquals("CONNECT", body.getString("method"));
-    assertEquals("deeper", body.getString("route"));
+    assertNull(body.getString("route"));
     String line = auditLine();
-    assertTrue(line.contains(" route=deeper method=CONNECT target=127.0.0.1 path=- status=403"), line);
-    assertTrue(line.endsWith(" reason=method-not-granted"), line);
+    assertTrue(
+        line.contains(" route=- method=CONNECT target=127.0.0.1:" + echo.actualPort() + " path=- status=403"),
+        line);
+    assertTrue(line.endsWith(" reason=no-grant"), line);
 
     // No route reaches this one at all.
     answer =

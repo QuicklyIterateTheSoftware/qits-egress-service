@@ -34,20 +34,35 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
     `ScrubbingReadStream`, `ResponseScrub`), the exchanges in flight and the drain (`InFlight`),
     and the qits-edge copies (`EdgeHopByHop`, `EdgeRequestFraming`, `UpstreamRetry`,
     `UpstreamKeepAlive`, `UpstreamChannel`, `ProxyClients`, `UpstreamPools`/`UpstreamLease`/
-    `UpstreamOrigin`, `WebSocketSplice` from `EdgeWebSocketUpgrade`, `ShutdownLinger`). qits-edge's
+    `UpstreamOrigin`, `WebSocketSplice` from `EdgeWebSocketUpgrade`, `ShutdownLinger`), and the
+    interception of `CONNECT` tunnels (`Interception`: the loopback listener's options and the
+    tunnels by loopback port; qits-2644). qits-edge's
     `DrainCount` has no copy: it repairs Quarkus' HTTP drain count, and the proxy listener is a
     plain Vert.x server that `InFlight` counts itself.
   - `tls/` the per-host leaves (qits-2643): `LeafCertificates` (pre-issue, renewal, backoff,
     `issueNow`, `leafFor`), `LeafDoor` (the dial at qits-certificates and the `LeafIssuer` on it),
     `LeafKeys` (key, CSR, chain check), `LeafBearer` (the `qits` client's token), `LeafWiring` (the
-    `GrantTableAdopted` observer, the periodic tick, the producer).
+    `GrantTableAdopted` observer, the periodic tick, the producer; a `LeafIssuer` bean replaces the
+    door — the suites' `SuiteLeafIssuer`); and for interception (qits-2644) `SniKeyManager` (the key
+    per handshake by SNI), `TlsSelfCheck` (the live proof, its schedule in `TlsSelfCheck.Runner`) and
+    `AnchorTrust` (trust in the published anchors only).
 
 ## Conventions
 
 - **Two listeners, two audiences.** 8080 is behind the public edge (`host: egress`, `routes:
   /egress`): the grant-table door and health. 8081 is the proxy, reached only on the wire alias
   `${QITS_ENVIRONMENT}-qits-egress:8081`. Never put proxy traffic on 8080 or a management door on
-  8081.
+  8081. The third, the interception listener (`qits.egress.tls.port`, 8443), is bound to
+  `127.0.0.1` and reached only by the proxy's own tunnels: never bind it anywhere else, and never
+  serve a request on it whose tunnel entry is missing.
+- **A tunnel's TLS ends here, and its requests take the absolute-form path** (`EgressProxy.absolute`):
+  never add a second route match, injection or scrub for intercepted requests. A `CONNECT` reaches
+  `https` routes only; a plain-http route is never tunnelled.
+- **Upstream TLS is the JVM's public trust**, never the platform anchors and never trust-all. Only
+  the suites replace it, with `qits.egress.test.upstream-trust` (`testdb/SuiteTlsConfigSource`).
+- **The interception key is picked per handshake** (`tls/SniKeyManager`). Do not switch Vert.x' own
+  SNI on for that listener: it caches one `SslContext` per name and a renewed leaf would never be
+  served.
 - **The grant table is pushed** by qits-deployments (`PUT /egress/api/grant-table`, its client
   only) and stored in the database; this service never pulls it. Readiness never waits for it.
 - **Public, so public peers only.** No call to qits-projects, qits-deployments, qits-ci or any other
@@ -100,6 +115,10 @@ Green in `./mvnw verify`, broken only in the native binary. Keep them in mind:
 - **Randomness**: never a `SecureRandom`, `KeyPairGenerator` or anything seeded in a static field
   or at build time — the image heap refuses it (qits-certificates' first native release). `tls/LeafKeys`
   creates each per call.
+- **The interception listener** is the JDK's `SSLEngine` (`JdkSSLEngineOptions`), its key manager
+  plain Java (`KeyCertOptions.wrap(X509KeyManager)`): no OpenSSL, no reflection, no Bouncy Castle
+  provider. The self-check builds its `SSLContext`, `KeyStore` and PKIX `TrustManagerFactory` per
+  run and passes no `SecureRandom` of its own. `quarkus.ssl.native=true` carries the JDK's TLS.
 - **No JSON binding in `tls/`**: the leaf answer is read as a Vert.x `JsonObject` tree, so there is
   no type to register for reflection; a record bound by Jackson would join a `@RegisterForReflection`
   list with its test.
@@ -112,7 +131,7 @@ Every one of these compares by default and fails with a diff; `-Dgolden.update=t
 
 | File | Written by |
 |---|---|
-| `pacts/*_qits-certificates-service.json` | `contracts/consumer/CertificatesPactTest` (`leaf issued`, through the real `LeafDoor.post` with the state's CSR) |
+| `pacts/*_qits-certificates-service.json` | `contracts/consumer/CertificatesPactTest` (`leaf issued`, through the real `LeafDoor.post` with the state's CSR; `one ACTIVE anchor`, through `TlsSelfCheck.anchors` with `Accept: application/json`) |
 | `pacts/*_qits-idp-service.json` | `contracts/consumer/IdpPactTest` (the mint row run by `IdpTokenMintPactTest`, the introspection rows by `IdpIntrospectionPactTest`, the exchange rows by `IdpTokenExchangePactTest`). Written by `IdpPactTest.theCommittedPactIsWhatTheRowsWrite`, not the library's `compareOrWritePactFile`: the exchange rows' form body gets a provider-state generator `$.subject_token = ${subjectToken}` the library cannot express (idp's states mint a fresh subject token) |
 | `golden-masters/**` | `contracts/GoldenMasterRecordingTest`, states in `contracts/ProviderStates` |
 | `docs/openapi.yml` | `api/OpenApiSchemaExportTest` (always rewrites; the diff is the review) |
@@ -137,6 +156,18 @@ class loader Vert.x' JSON factory is Quarkus' and fails to load.
 MockIdp's own stubs cannot be used from a `@QuarkusTest` (a different class loader started it);
 `SuiteIdp` crosses loaders through system properties. The gateway suite's upstream is plain http,
 allowed only by `qits.egress.test.allow-plain-http=true` in the test properties.
+
+## The suites' TLS
+
+`support/SuiteTls` makes two throwaway CAs, written once per JVM to a directory parked in a system
+property so every class loader sees the same ones: `leaf` (signs the egress' leaf CSRs; the tunnel's
+client trusts it) and `upstream` (signs the fake third party's `localhost` certificate; the upstream
+pools trust it through `qits.egress.test.upstream-trust`, set by `testdb/SuiteTlsConfigSource`). In
+every `@QuarkusTest` the leaves come from `tls/SuiteLeafIssuer` (a `LeafIssuer` bean; a host in
+`REFUSED` is answered 503); the packaged `stories/egress/EgressInterceptionIT` goes through the real
+`LeafDoor` to a fake qits-certificates in its own JVM and drives `curl -x` through a tunnel. The
+self-check is off in `%test`: its schedule is `TlsSelfCheckTest`, its probe runs against the real
+listeners in `EgressInterceptionTest`.
 
 ## The userflow catalogue
 

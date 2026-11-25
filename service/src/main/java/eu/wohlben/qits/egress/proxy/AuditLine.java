@@ -13,7 +13,9 @@ import org.jboss.logging.Logger;
  *     path=&lt;path without query&gt; status=&lt;n&gt; durationMs=&lt;n&gt; reason=&lt;reason or -&gt;
  * </pre>
  *
- * <p>(one line; wrapped here). It never carries a header value, a query value, a body or a secret:
+ * <p>(one line; wrapped here). A call inside an intercepted {@code CONNECT} tunnel (qits-2644)
+ * ends in {@code tls=intercepted}; the {@code CONNECT} itself in {@code tls=intercepted
+ * leafSerial=<hex>}, the leaf the tunnel's handshake is served. It never carries a header value, a query value, a body or a secret:
  * the fields are the principal, the route name, the method, the target host, the path without its
  * query, the status — the upstream's for an allowed call, the gateway's own otherwise — and the
  * reason a call was refused. Every field the caller influences is reduced to a safe alphabet, so a
@@ -49,6 +51,10 @@ final class AuditLine {
   private volatile String reason = "-";
 
   private volatile boolean upstreamAnswered;
+
+  private volatile boolean intercepted;
+
+  private volatile String leafSerial;
 
   AuditLine(String method, String path) {
     this.method = method;
@@ -90,6 +96,19 @@ final class AuditLine {
    */
   AuditLine reason(String reason) {
     this.reason = reason;
+    return this;
+  }
+
+  /** The call is inside, or is, an intercepted tunnel: {@code tls=intercepted}. */
+  AuditLine intercepted() {
+    this.intercepted = true;
+    return this;
+  }
+
+  /** The intercepted {@code CONNECT}'s leaf: {@code leafSerial=<hex>}. */
+  AuditLine leafSerial(String serial) {
+    this.intercepted = true;
+    this.leafSerial = serial;
     return this;
   }
 
@@ -136,7 +155,9 @@ final class AuditLine {
         + " durationMs="
         + durationMs
         + " reason="
-        + clean(why);
+        + clean(why)
+        + (intercepted ? " tls=intercepted" : "")
+        + (leafSerial != null ? " leafSerial=" + clean(leafSerial) : "");
   }
 
   static String clean(String value) {

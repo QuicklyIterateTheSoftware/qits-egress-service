@@ -1,2 +1,3 @@
 eu.wohlben.qits.egress.testdb.EmbeddedPgConfigSource
 eu.wohlben.qits.egress.testdb.MockIdpConfigSource
+eu.wohlben.qits.egress.testdb.SuiteTlsConfigSource

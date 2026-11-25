@@ -82,13 +82,16 @@ class OutboundCallGuardTest {
               "a granted route's WebSocket handshake to its third-party target: no qits service"),
           Map.entry(
               "eu.wohlben.qits.egress.proxy.ConnectTunnel",
-              "a CONNECT tunnel (a Vert.x NetClient) to a granted route's third-party target: no qits" + " service, never a platform route"),
+              "a CONNECT tunnel's loopback connection (a Vert.x NetClient) to the interception" + " listener on 127.0.0.1: no qits service"),
           Map.entry(
               "eu.wohlben.qits.egress.tls.LeafDoor",
               "qits-certificates issueLeaf (CertificatesPactTest LEAF_ISSUED)"),
           Map.entry(
               "eu.wohlben.qits.egress.tls.LeafWiring",
               "builds the client LeafDoor dials with"),
+          Map.entry(
+              "eu.wohlben.qits.egress.tls.TlsSelfCheck",
+              "qits-certificates getAnchors (CertificatesPactTest ANCHORS_READ); its probe is a raw" + " socket to this process' own proxy listener"),
           Map.entry(
               "eu.wohlben.qits.egress.tls.LeafBearer",
               "the `qits` client's mint (IdpPactTest MINT)"));

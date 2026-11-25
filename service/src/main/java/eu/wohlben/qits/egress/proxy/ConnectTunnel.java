@@ -12,18 +12,25 @@ import java.util.Locale;
 import org.jboss.logging.Logger;
 
 /**
- * <b>A {@code CONNECT} tunnel</b> to a granted route's host and port: the bytes are spliced both
- * ways, with back-pressure, until either side closes. Nothing is injected and nothing is scrubbed —
- * they are the caller's TLS to the third party, opaque here — so a route grants {@code CONNECT}
- * only on purpose ({@code methods: [CONNECT]}). The tunnel's exchange is held until its sockets
- * close, so a drain waits for it.
+ * <b>A {@code CONNECT} tunnel, intercepted</b> (qits-2644): the caller's socket is spliced, with
+ * back-pressure, to a fresh connection to the loopback interception listener ({@link Interception}),
+ * where its TLS ends with the host's leaf and each request inside is served like an absolute-form
+ * call — the route's secret injected, the answer scrubbed, every request audited. The bytes never
+ * go to the target as they came: the target is dialled per inner request by the proxy's upstream
+ * pool, over TLS verified against the JVM's public trust.
+ *
+ * <p>The tunnel's exchange is held until its sockets close, so a drain waits for it; the loopback
+ * connection's {@link Interception.Tunnel} entry is removed at the same moment.
  */
 final class ConnectTunnel {
 
   private static final Logger LOG = Logger.getLogger(ConnectTunnel.class);
 
-  /** How long the TCP connect to the target may take. */
+  /** How long the TCP connect to the loopback listener may take. */
   static final int CONNECT_TIMEOUT_MS = 5_000;
+
+  /** Where the interception listener is bound: loopback only. */
+  static final String LOOPBACK = "127.0.0.1";
 
   private final NetClient client;
 
@@ -81,9 +88,13 @@ final class ConnectTunnel {
       }
     }
 
-    /** Whether a route's target is this host and port. A platform route is never tunnelled. */
+    /**
+     * Whether a route's target is this host and port. Only an {@code https} target is tunnelled —
+     * the tunnel's TLS is ended here — and a platform route never is.
+     */
     boolean reaches(GrantRoute route) {
       return !route.isPlatform()
+          && route.ssl()
           && route.targetProblem() == null
           && route.host() != null
           && route.host().equalsIgnoreCase(host)
@@ -96,39 +107,53 @@ final class ConnectTunnel {
     }
   }
 
-  /** Dial the target, then answer {@code 200} and splice; a target that does not answer is 502. */
-  void open(HttpServerRequest request, Authority authority, InFlight.Exchange exchange, AuditLine audit) {
+  /**
+   * Dial the loopback listener, record the tunnel under the connection's local port, then answer
+   * {@code 200 Connection Established} and splice. A listener that does not answer is 502.
+   */
+  void open(
+      HttpServerRequest request,
+      int loopbackPort,
+      Interception interception,
+      Interception.Tunnel tunnel,
+      InFlight.Exchange exchange,
+      AuditLine audit) {
     client
-        .connect(authority.port(), authority.host())
+        .connect(loopbackPort, LOOPBACK)
         .onFailure(
             failure -> {
-              LOG.warnf("no tunnel to %s: %s", authority, failure.toString());
+              LOG.errorf("no loopback connection for a tunnel to %s: %s", tunnel.authority(), failure.toString());
               request.resume();
               HttpServerResponse response = request.response();
               if (!response.ended() && !response.closed()) {
                 response
                     .setStatusCode(502)
                     .putHeader(HttpHeaders.CONTENT_TYPE, "application/json")
-                    .end(new JsonObject().put("error", "the target cannot be reached").encode());
+                    .end(new JsonObject().put("error", "the tunnel cannot be opened").encode());
               }
             })
         .onSuccess(
             outbound -> {
+              int localPort = outbound.localAddress().port();
+              interception.register(localPort, tunnel);
               audit.upstreamAnswered();
               outbound.pause();
               exchange.splice();
               request.resume();
+              request.response().setStatusMessage("Connection Established");
               request
                   .toNetSocket()
                   .onFailure(
                       failure -> {
+                        interception.release(localPort, tunnel);
                         outbound.close();
                         exchange.settle();
-                        LOG.errorf(failure, "could not take over the caller's connection for a tunnel to %s", authority);
+                        LOG.errorf(failure, "could not take over the caller's connection for a tunnel to %s", tunnel.authority());
                       })
                   .onSuccess(
                       inbound -> {
-                        WebSocketSplice.splice(inbound, outbound, exchange);
+                        WebSocketSplice.splice(
+                            inbound, outbound, exchange, () -> interception.release(localPort, tunnel));
                         outbound.resume();
                       });
             });

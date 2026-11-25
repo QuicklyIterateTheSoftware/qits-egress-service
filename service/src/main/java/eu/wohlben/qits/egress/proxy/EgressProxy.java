@@ -4,9 +4,12 @@ import eu.wohlben.qits.egress.grants.GrantIndex;
 import eu.wohlben.qits.egress.grants.GrantRoute;
 import eu.wohlben.qits.egress.identity.CallerIdentity;
 import eu.wohlben.qits.egress.identity.PlatformBearers;
+import eu.wohlben.qits.egress.tls.Leaf;
+import eu.wohlben.qits.egress.tls.LeafCertificates;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
+import io.vertx.core.Context;
 import io.vertx.core.Future;
 import io.vertx.core.MultiMap;
 import io.vertx.core.Vertx;
@@ -21,6 +24,7 @@ import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
 import io.vertx.core.http.RequestOptions;
 import io.vertx.core.json.JsonObject;
+import io.vertx.core.net.PemTrustOptions;
 import io.vertx.httpproxy.HttpProxy;
 import io.vertx.httpproxy.OriginRequestProvider;
 import io.vertx.httpproxy.ProxyOptions;
@@ -30,6 +34,7 @@ import jakarta.inject.Inject;
 import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -41,8 +46,10 @@ import org.jboss.logging.Logger;
  * wire alias {@code ${QITS_ENVIRONMENT}-qits-egress:8081}. It serves the GATEWAY form, {@code
  * /<route>/<rest>?<query>}, streams and WebSockets, scrubs secret routes' answers and drains on
  * shutdown (qits-2621), takes absolute-form requests and {@code CONNECT} from {@code HTTPS_PROXY}
- * clients ({@link Form}, qits-2622), and serves platform routes with the caller's bearer exchanged
- * at qits-idp (qits-2623).
+ * clients ({@link Form}, qits-2622), serves platform routes with the caller's bearer exchanged at
+ * qits-idp (qits-2623), and ends the TLS of a granted {@code CONNECT} on a loopback listener of its
+ * own, serving every request inside the tunnel like an absolute-form one ({@link Interception},
+ * qits-2644).
  *
  * <p>One call, in order:
  *
@@ -102,6 +109,8 @@ public class EgressProxy {
 
   @Inject PlatformBearers platformBearers;
 
+  @Inject LeafCertificates leaves;
+
   @ConfigProperty(name = "qits.egress.proxy.port", defaultValue = "8081")
   int port;
 
@@ -111,7 +120,24 @@ public class EgressProxy {
   @ConfigProperty(name = "quarkus.shutdown.timeout", defaultValue = "5m")
   Duration shutdownTimeout;
 
+  /** The interception listener's port, on loopback only (qits-2644). */
+  @ConfigProperty(name = "qits.egress.tls.port", defaultValue = "8443")
+  int tlsPort;
+
+  /**
+   * TEST ONLY: a PEM file of the certificates the upstream pools trust INSTEAD of the JVM's — the
+   * suites' fake https upstream. Empty in a deployment, where an upstream is verified against the
+   * JVM's public trust store and nothing else.
+   */
+  @ConfigProperty(name = "qits.egress.test.upstream-trust")
+  Optional<String> upstreamTrust;
+
   private HttpServer server;
+
+  /** The interception listener: TLS ended inside {@code CONNECT} tunnels (qits-2644). */
+  private HttpServer intercepting;
+
+  private final Interception interception = new Interception();
 
   /**
    * One proxy client and its {@link UpstreamPools}: the client every call is asked of, and {@code
@@ -161,16 +187,42 @@ public class EgressProxy {
             .toCompletableFuture()
             .get(30, TimeUnit.SECONDS);
     LOG.infof("the egress proxy listens on %s:%d", host, server.actualPort());
+    intercepting =
+        vertx
+            .createHttpServer(Interception.options(ConnectTunnel.LOOPBACK, tlsPort, leaves))
+            // No inFlight.accept here: a tunnel the 8081 listener admitted is served whatever the
+            // drain says — its CONNECT is the call in flight the drain waits for.
+            .requestHandler(this::intercepted)
+            .listen()
+            .toCompletionStage()
+            .toCompletableFuture()
+            .get(30, TimeUnit.SECONDS);
+    LOG.infof(
+        "the egress interception listener listens on %s:%d",
+        ConnectTunnel.LOOPBACK, intercepting.actualPort());
   }
 
   private Pool pool(String name) {
-    HttpClientOptions options = ProxyClients.proxyClientOptions(5_000);
+    HttpClientOptions options = upstreamTrust(ProxyClients.proxyClientOptions(5_000));
     UpstreamPools pools = new UpstreamPools(name, options.getMaxPoolSize());
     return new Pool(
         ProxyClients.proxyClient(vertx, options, pools::connected),
         ProxyClients.proxyClient(
-            vertx, ProxyClients.proxyClientOptions(5_000).setKeepAlive(false), pools::connected),
+            vertx,
+            upstreamTrust(ProxyClients.proxyClientOptions(5_000)).setKeepAlive(false),
+            pools::connected),
         pools);
+  }
+
+  /**
+   * The JVM's trust store, untouched — unless the suites name a fake upstream's CA
+   * ({@code qits.egress.test.upstream-trust}). Never trust-all, never the platform's own anchors.
+   */
+  private HttpClientOptions upstreamTrust(HttpClientOptions options) {
+    upstreamTrust
+        .filter(path -> !path.isBlank())
+        .ifPresent(path -> options.setTrustOptions(new PemTrustOptions().addCertPath(path)));
+    return options;
   }
 
   /**
@@ -232,6 +284,16 @@ public class EgressProxy {
   /** The port the listener is bound to — the configured one, or the one picked for port 0. */
   public int port() {
     return server.actualPort();
+  }
+
+  /** The interception listener's port, on {@code 127.0.0.1}. */
+  int tlsPort() {
+    return intercepting.actualPort();
+  }
+
+  /** How many intercepted tunnels are open. */
+  int interceptedTunnels() {
+    return interception.open();
   }
 
   /** The three request forms the listener takes. */
@@ -411,10 +473,12 @@ public class EgressProxy {
   }
 
   /**
-   * {@code CONNECT host:port}: a tunnel, for a route whose target is that host and port and whose
-   * {@code methods} hold {@code CONNECT}. Nothing is injected — the bytes are the caller's TLS —
-   * and nothing is scrubbed; the audit line is {@code method=CONNECT path=-}, written when the
-   * tunnel closes.
+   * {@code CONNECT host:port}: a tunnel, for an {@code https} route whose target is that host and
+   * port and whose {@code methods} hold {@code CONNECT}. Its TLS is ended here (qits-2644): the
+   * host's leaf is made sure of — held, or issued inline within {@code qits.egress.leaves.timeout}
+   * — or the answer is 503, reason {@code no-leaf}; then {@code 200} and a splice to the
+   * interception listener. The audit line is {@code method=CONNECT target=<host:port> path=-
+   * ... tls=intercepted leafSerial=<hex>}, written when the tunnel closes.
    */
   private void connect(Call call) {
     HttpServerRequest request = call.request();
@@ -425,7 +489,7 @@ public class EgressProxy {
       refuse(request, audit, 400, "bad-target", error("CONNECT takes host:port"));
       return;
     }
-    audit.target(authority.host(), "-");
+    audit.target(authority.toString(), "-");
     GrantIndex.Table table = grants.current();
     if (table == null) {
       refuse(request, audit, 503, "no-table", error("no grant table yet"));
@@ -464,8 +528,88 @@ public class EgressProxy {
       return;
     }
     audit.route(granted.name());
+    GrantRoute route = granted;
+    Context context = vertx.getOrCreateContext();
+    leaves
+        .issueNow(authority.host())
+        .whenComplete(
+            (leaf, failure) ->
+                context.runOnContext(
+                    v -> {
+                      if (failure != null || leaf == null) {
+                        LOG.warnf(
+                            "no leaf for a CONNECT to %s: %s",
+                            authority,
+                            failure == null ? "none" : failure.toString());
+                        refuse(request, audit, 503, "no-leaf", error("no certificate for the host yet"));
+                        return;
+                      }
+                      intercept(call, authority, route, leaf);
+                    }));
+  }
+
+  /** A granted {@code CONNECT} whose host's leaf is held: {@code 200}, and into the listener. */
+  private void intercept(Call call, ConnectTunnel.Authority authority, GrantRoute route, Leaf leaf) {
+    AuditLine audit = call.audit();
     audit.allow();
-    tunnels.open(request, authority, call.exchange(), audit);
+    audit.leafSerial(leaf.serial());
+    tunnels.open(
+        call.request(),
+        intercepting.actualPort(),
+        interception,
+        new Interception.Tunnel(call.verdict(), authority, route.name()),
+        call.exchange(),
+        audit);
+  }
+
+  /**
+   * A request inside an intercepted tunnel, on the loopback listener: the caller is the tunnel's,
+   * looked up by the connection's remote port; the target origin is {@code https://<SNI host>:<the
+   * CONNECT's port>}; then the absolute-form path — route by origin and base path, the inner
+   * method checked, credentials stripped, secret injected, answer scrubbed — and an audit line with
+   * {@code tls=intercepted}. A {@code Host} that is not the SNI host is 421.
+   */
+  void intercepted(HttpServerRequest request) {
+    request.pause();
+    String path = request.path() == null || request.path().isEmpty() ? "/" : request.path();
+    AuditLine audit = new AuditLine(request.method().name(), path).intercepted();
+    HttpServerResponse response = request.response();
+    InFlight.Exchange exchange = inFlight.open(request, () -> audit.write(response.getStatusCode()));
+    if (exchange == null) {
+      return;
+    }
+    Interception.Tunnel tunnel =
+        request.connection() == null || request.connection().remoteAddress() == null
+            ? null
+            : interception.at(request.connection().remoteAddress().port());
+    if (tunnel == null) {
+      refuse(request, audit, 403, "no-tunnel", error("not a tunnel this proxy opened"));
+      return;
+    }
+    audit.principal(tunnel.verdict().principal());
+    String sni = Interception.sniHost(request.connection());
+    audit.target(sni == null ? tunnel.authority().host() : sni, path);
+    if (sni == null
+        || !sni.equals(tunnel.authority().host())
+        || !Interception.hostMatches(
+            request.getHeader(HttpHeaders.HOST), sni, tunnel.authority().port())) {
+      refuse(
+          request,
+          audit,
+          421,
+          "misdirected",
+          error("the request's Host is not the tunnel's host"));
+      return;
+    }
+    String query = request.query();
+    absolute(
+        new Call(request, audit, exchange, tunnel.verdict(), null),
+        new AbsoluteTarget(
+            "https",
+            sni,
+            tunnel.authority().port(),
+            path,
+            query == null || query.isEmpty() ? null : query));
   }
 
   /** The 403 body: who asked for what. */

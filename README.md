@@ -27,6 +27,7 @@ The application is `qits-egress`, image `qits/qits-egress`, two replicas.
 |---|---|---|
 | 8080 | Quarkus HTTP, the **management** listener: `/egress/api` (the grant-table door) and `/egress/q` (health) | `https://egress.qits.<domain>/egress` through the **public** edge; the deployer's healthcheck at `/egress/q/health/ready` |
 | 8081 | Vert.x server (HTTP/1.1, no h2c), the **proxy**: gateway form `/<route>/<rest>` (qits-2620), streams, WebSockets, scrubbing and the drain (qits-2621), absolute-form `HTTP(S)_PROXY` requests and `CONNECT` (qits-2622) | `http://${QITS_ENVIRONMENT}-qits-egress:8081`, the wire alias on qits-net only; no edge routes it |
+| 8443 | Vert.x server, TLS, bound to **127.0.0.1 only**: the **interception** listener, where a granted `CONNECT`'s TLS ends (qits-2644) | only by the proxy's own tunnels; nothing outside the process' network namespace |
 
 ## The grant table is pushed, not pulled
 
@@ -145,18 +146,90 @@ A client configured with `HTTPS_PROXY=http://<any user>:<bearer>@${QITS_ENVIRONM
 - **Absolute-form** (`proxy/AbsoluteTarget`): the caller's granted route whose target ORIGIN is the
   request's — scheme, host, port with each scheme's default — and whose base path prefixes the
   path on a segment boundary; of several, the longest base path. A platform route's origin is
-  `https://<label>.qits.${QITS_DOMAIN}`. Because a proxy client tunnels every `https://` URL with
-  `CONNECT` (nothing can be injected into a tunnel), `http://host[:80]/…` also matches a route
-  `https://host[:443]`: the client sends plain http on qits-net, and the gateway is the TLS client —
-  nothing leaves in plain http that the route did not declare. Then the same method check,
+  `https://<label>.qits.${QITS_DOMAIN}`. `http://host[:80]/…` also matches a route
+  `https://host[:443]`: a client may send plain http on qits-net, and the gateway is the TLS client —
+  nothing leaves in plain http that the route did not declare. (A client that tunnels its
+  `https://` URLs with `CONNECT` gets the same treatment inside the tunnel, below.) Then the same method check,
   injection, scrubbing and audit as the gateway form, the upstream path being the request's own.
   No route: **403** `{"error":"no grant","principal","route","method","target"}`.
-- **`CONNECT host:port`** (`proxy/ConnectTunnel`): only for a route whose target is that host and
-  port and whose `methods` hold `CONNECT`, never a platform route. The gateway dials the target,
-  answers `200` and splices the bytes both ways with back-pressure; nothing is injected or
-  scrubbed (the bytes are the caller's own TLS). A route that reaches the host:port without
-  `CONNECT`, or none at all: **403**. A tunnel needs only a target: a `CONNECT`-only route may name
-  no secret. Audit: `method=CONNECT path=- status=200`, written when the tunnel closes.
+- **`CONNECT host:port`** (`proxy/ConnectTunnel`, `proxy/Interception`): only for an `https` route
+  whose target is that host and port and whose `methods` hold `CONNECT`, never a platform route or
+  a plain-http one. The tunnel's **TLS is ended here** (qits-2644, below): every request inside it
+  is served like an absolute-form request. A route that reaches the host:port without `CONNECT`, or
+  none at all: **403**. No leaf for the host: **503**.
+
+### TLS interception in `CONNECT` tunnels (qits-2644)
+
+A client behind `HTTPS_PROXY` tunnels every `https://` URL with `CONNECT`. The gateway does not
+splice that tunnel to the target: it ends the client's TLS itself, with a leaf for the host certified
+by the platform CA (qits-certificates, which every platform workload trusts), so the requests inside
+are seen, granted, injected, scrubbed and audited like any other.
+
+1. **The grant**, as above: an `https` route of the caller's for that host:port with `CONNECT`.
+2. **The leaf** (`tls/LeafCertificates`): the one held, or one issued inline within
+   `qits.egress.leaves.timeout` (10 s). None: **503** `{"error":"no certificate for the host yet"}`,
+   audit `DENY reason=no-leaf`.
+3. **`200 Connection Established`**, and the caller's socket spliced (back-pressure both ways) to a
+   fresh connection to the **interception listener**, a second Vert.x server on
+   `127.0.0.1:${qits.egress.tls.port}` (8443), bound to loopback only. The caller's principal, the
+   granted route and the `host:port` are recorded under that loopback connection's LOCAL port —
+   the remote port the listener sees — and removed when the splice closes. A loopback connection
+   with no entry gets **403** (reason `no-tunnel`).
+4. **The handshake**: TLS, ALPN `http/1.1` only, the JDK's `SSLEngine`. The key and chain are picked
+   per handshake by SNI (`tls/SniKeyManager`, an `X509ExtendedKeyManager` reading the requested
+   name from the handshake session and asking `LeafCertificates.leafFor`): no SNI, or a name this
+   replica holds no valid leaf for, fails the handshake. Vert.x' own SNI switch is off — it caches a
+   `SslContext` per name, which would keep serving a renewed host's old leaf.
+5. **Each inner request** is an ordinary HTTP request on that listener: its caller is the tunnel's,
+   its target origin `https://<SNI host>:<CONNECT port>`, and then the absolute-form path — the
+   route matched by origin and base path, the `methods` check on the **inner** method (403),
+   `Authorization`/`Proxy-Authorization`/`Cookie`/`X-Qits-*` removed, the route's secret injected,
+   `Accept-Encoding: identity`, the answer scrubbed and streamed (SSE and WebSockets inside the
+   tunnel take the same streaming paths). An SNI that is not the `CONNECT`'s host, or a `Host`
+   header that is not the SNI host (or names another port): **421**, reason `misdirected`. A route
+   whose secret this process does not hold answers what the absolute form answers: **502** `secret
+   not configured`.
+6. **Upstream TLS** is the proxy pools' own: verified against the JVM's default trust store
+   (`quarkus.ssl.native=true`), never the platform anchors and never trust-all. Only the suites
+   replace it, through the test-only `qits.egress.test.upstream-trust` (a PEM file).
+
+An intercepted tunnel is one exchange in flight from its `CONNECT` until its sockets close, so the
+drain waits for it (and the requests inside it are counted too).
+
+### The TLS self-check (`tls/TlsSelfCheck`)
+
+The live proof that a tunnel's TLS ends with a platform-issued leaf. `.config/qits/egress.yml`
+declares the route `tls-self-check` → `https://api.hetzner.cloud`, `methods: [CONNECT, HEAD]`, for
+qits-egress itself (principal `application:qits-egress`). When the table in force grants it and the
+host's leaf is held (it waits up to 2 minutes for pre-issue), the egress
+
+1. reads the platform anchors, `GET ${qits.egress.certificates-url}/api/anchors` with `Accept:
+   application/json` (a public door; each anchor's `subject` and the `sha256` of its DER
+   certificate, pacted as `one ACTIVE anchor`);
+2. opens `CONNECT api.hetzner.cloud:443` on its own `127.0.0.1:8081` with `Proxy-Authorization:
+   Bearer <its own qits client token>`;
+3. handshakes inside the tunnel trusting **only** those anchors (`tls/AnchorTrust`: a certificate of
+   the presented chain must BE a published anchor — its digest listed — and becomes the one trust
+   anchor of a standard PKIX validation, host name included; the JVM's trust store plays no part);
+4. sends `HEAD /v1/` (reads nothing).
+
+One line on logger `eu.wohlben.qits.egress.tls`:
+
+    egress tls self-check ok host=api.hetzner.cloud leafSerial=<hex> issuer=<anchor subject> status=<n>   (INFO)
+    egress tls self-check failed host=<h> reason=<r> retryIn=<d>                                        (WARN)
+
+`status` is the upstream's answer to the `HEAD`: while `QITS_EGRESS_SECRET_HETZNER_DNS` is not set
+the inner request answers 502 `secret not configured`, and the check still proves the chain. A
+failure retries after `qits.egress.leaves.backoff-min` (30 s) doubling to `backoff-max` (10 min). It
+runs again when the route's target changes and when the anchors' `version` moves (read every
+`qits.egress.tls.self-check.anchors-interval`, 10 min). It never touches readiness.
+
+| Key | Default |
+|---|---|
+| `qits.egress.tls.port` | `8443` (`0` in `%test`) |
+| `qits.egress.tls.self-check.enabled` | `true` (`false` in `%test`) |
+| `qits.egress.tls.self-check.anchors-interval` | `10m` |
+| `qits.egress.test.upstream-trust` | unset: the JVM's trust (suites only) |
 
 ### Streams and WebSockets
 
@@ -206,10 +279,16 @@ the connection closes:
 
     egress decision=ALLOW|DENY principal=<p> route=<r> method=<M> target=<host> path=<path without query> status=<n> durationMs=<n> reason=<reason or ->
 
+A request inside an intercepted tunnel appends ` tls=intercepted`; the `CONNECT` itself has
+`target=<host:port>` and appends ` tls=intercepted leafSerial=<hex>` (the leaf the tunnel's handshake
+is served), written when the tunnel closes.
+
 `status` is the upstream's for an allowed call and the gateway's own otherwise. Reasons:
 `no-credentials`, `bad-credentials`, `idp-unreachable`, `no-table`, `no-route`, `bad-path`,
 `no-grant`, `method-not-granted`, `bad-route`, `no-secret`, `exchange-refused`, `bad-target` (an
-absolute-form or `CONNECT` target that does not parse), and on an ALLOW
+absolute-form or `CONNECT` target that does not parse), `no-leaf` (a `CONNECT` whose host gets no
+leaf), `misdirected` (an inner request whose SNI or `Host` is not the tunnel's, 421), `no-tunnel` (a
+loopback connection no tunnel opened), and on an ALLOW
 `upstream-unreachable` when the proxy answered 502 itself, `upstream-encoded` when a secret route's
 answer was encoded and refused, `websocket` for a spliced socket (written at its close, status 101). Never a header value, a query value, a
 body or a secret; caller-influenced values are reduced to a safe alphabet.
@@ -238,8 +317,8 @@ table in force, certified by qits-certificates.
   leaf is served until its notAfter. A host that left the table is not renewed and its leaf lapses.
 - **On demand**: `LeafCertificates.issueNow(host)` answers the held leaf, joins the issuance in
   flight, or starts one outside the queue, failing after `qits.egress.leaves.timeout` (10 s) — for
-  the `CONNECT` with no leaf (qits-2622). `leafFor(host)` gives the valid leaf (`key()`, `chain()`)
-  a `KeyManager` picks by SNI.
+  the `CONNECT` with no leaf. `leafFor(host)` gives the valid leaf (`key()`, `chain()`) the
+  interception listener's `SniKeyManager` picks by SNI (qits-2644).
 - **Readiness is not tied to leaves.** Nothing is shared between replicas. Without a `qits` client
   (a clone, the suites) nothing is asked for and each attempt is one WARN.
 
@@ -261,8 +340,9 @@ Log lines on logger `eu.wohlben.qits.egress.tls`:
 
 qits-egress is public, so it reaches **public platform services only**: qits-idp (at
 `https://idp.qits.<domain>/idp`: JWKS, discovery, introspection and the token exchange, each with a
-pact row in `pacts/qits-egress-service_qits-idp-service.json`), qits-certificates' leaf door (at
-`https://certificates.qits.<domain>/certificates`, through the edge), qits-observability's OTLP intake,
+pact row in `pacts/qits-egress-service_qits-idp-service.json`), qits-certificates' leaf and anchors
+doors (at `https://certificates.qits.<domain>/certificates`, through the edge), qits-observability's
+OTLP intake,
 and public targets of platform routes. qits-projects, qits-deployments, qits-ci and every other private service are unreachable
 from it — never add a call to one. A private caller or target needs a private egress variant, which
 is follow-up work.

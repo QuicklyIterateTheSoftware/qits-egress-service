@@ -8,6 +8,111 @@
         "references": {
           "qits-call": {
             "app": "qits-certificates-service",
+            "operationId": "getAnchors"
+          },
+          "qits-trigger": {
+            "app": "qits-egress-service",
+            "event": "GrantTableAdopted",
+            "kind": "event"
+          }
+        }
+      },
+      "description": "GrantTableAdopted: getAnchors",
+      "key": "350a3267",
+      "pending": false,
+      "providerStates": [
+        {
+          "name": "one ACTIVE anchor",
+          "params": {
+            "activeAnchorId": "00000000-0000-4000-8000-000000000001"
+          }
+        }
+      ],
+      "request": {
+        "headers": {
+          "Accept": [
+            "application/json"
+          ]
+        },
+        "method": "GET",
+        "path": "/certificates/api/anchors"
+      },
+      "response": {
+        "body": {
+          "content": {
+            "anchors": [
+              {
+                "sha256": "ac7b69470e98c537b085a2dca9952627618e3a82fa782cbef5b5662d75e1324d",
+                "subject": "CN=qits platform CA dev 2026-11, O=qits"
+              }
+            ],
+            "version": "31a1c4eb354d476295a941e578b9accf60b61c5d1c4d73325cbf70f40b7513d4"
+          },
+          "contentType": "application/json",
+          "encoded": false
+        },
+        "headers": {
+          "Content-Type": [
+            "application/json"
+          ]
+        },
+        "matchingRules": {
+          "body": {
+            "$.anchors": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 0
+                }
+              ]
+            },
+            "$.anchors[*].sha256": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.anchors[*].subject": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.version": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          },
+          "header": {
+            "Content-Type": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "application/json.*"
+                }
+              ]
+            }
+          }
+        },
+        "status": 200
+      },
+      "type": "Synchronous/HTTP"
+    },
+    {
+      "comments": {
+        "references": {
+          "qits-call": {
+            "app": "qits-certificates-service",
             "operationId": "issueLeaf"
           },
           "qits-trigger": {

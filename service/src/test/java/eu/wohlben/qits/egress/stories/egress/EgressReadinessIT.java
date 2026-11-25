@@ -67,6 +67,8 @@ public class EgressReadinessIT {
       // The proxy listener's own validation (discovery, JWKS) reads the same mock, on a free port.
       overrides.put("qits.egress.idp.url", idp.baseUrl());
       overrides.put("qits.egress.proxy.port", String.valueOf(proxyPort()));
+      // The loopback interception listener (qits-2644) on a free port, never the host's 8443.
+      overrides.put("qits.egress.tls.port", "0");
       overrides.put("quarkus.otel.sdk.disabled", "true");
       overrides.put("quarkus.shutdown.delay", "0s");
       return overrides;

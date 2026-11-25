@@ -9,6 +9,7 @@ import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.event.Observes;
+import jakarta.enterprise.inject.Instance;
 import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
@@ -38,6 +39,12 @@ public class LeafWiring {
   @Inject GrantIndex index;
 
   @Inject LeafBearer bearer;
+
+  /**
+   * A {@link LeafIssuer} bean, when there is one: the suites' throwaway CA. A deployment has none,
+   * and the leaves are issued by {@link LeafDoor} at qits-certificates.
+   */
+  @Inject Instance<LeafIssuer> issuers;
 
   @ConfigProperty(name = "qits.egress.certificates-url")
   String certificatesUrl;
@@ -70,17 +77,19 @@ public class LeafWiring {
   void build() {
     // A small client of its own, never the proxy's; TLS by the JVM trust store (quarkus.ssl.native).
     client = vertx.createHttpClient(new HttpClientOptions().setKeepAlive(true).setVerifyHost(true));
-    LeafDoor door =
-        new LeafDoor(vertx, client, certificatesUrl, bearer::token, timeout.toMillis());
+    LeafIssuer issuer =
+        issuers.isResolvable()
+            ? issuers.get()
+            : new LeafDoor(vertx, client, certificatesUrl, bearer::token, timeout.toMillis());
     leaves =
         new LeafCertificates(
-            door,
+            issuer,
             Clock.systemUTC(),
             new LeafCertificates.Settings(
                 renewFraction, concurrency, backoffMin, backoffMax, timeout));
   }
 
-  /** This replica's leaves, for the interception listener (qits-2622's CONNECT). */
+  /** This replica's leaves, for the interception listener (qits-2644) and its self-check. */
   @Produces
   @Singleton
   LeafCertificates leafCertificates() {
