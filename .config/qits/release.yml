@@ -1,0 +1,23 @@
+# How this repository releases: the packaged java-service recipe (qits-ci-service
+# ci/src/main/resources/release-archetypes/java-service.yml) — build and test the fold, then push the
+# one image and publish the declared contracts.
+archetype: java-service
+
+artifacts:
+  - { type: docker, name: qits/qits-egress, sbom: .sbom/sbom.json }
+
+# The userflow catalogue (service/src/test/.../stories/**IT), published as @userflows/qits-egress:
+# the java-service recipe's build-and-test step requires */target/userstories from the verify.
+userflows: qits-egress
+
+# THE PACTS this service writes as a consumer, flat in `pacts/`:
+#   qits-idp-service       quarkus-oidc's discovery and JWKS reads and the `qits` client's mint
+#                          (contracts/consumer/IdpPactTest, IdpTokenMintPactTest).
+#
+# No golden masters, no `@apidocs`, no entity map and no entity diagram yet: the scaffold serves no
+# operation and maps no entity. The grant-table door (qits-2620) brings docs/openapi.yml, the
+# `@apidocs/qits-egress` docs artifact, `golden-masters:`, `entities:` and `database:` together.
+contracts:
+  application: qits-egress
+  pacts:
+    qits-idp-service: { packages: [maven] }

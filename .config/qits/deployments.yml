@@ -1,0 +1,36 @@
+# How qits-deployments deploys this repository. It reads this file from the git host at the built
+# sha, so the answer travels with the commit; carrying the file at all is what says it deploys.
+#
+# THE DEPLOYED IDENTITY: the application qits-egress, its image qits/qits-egress, its database and
+# its idp client all carry this name.
+application: qits-egress
+
+# https://egress.qits.<domain>/egress: the MANAGEMENT listener (8080) — the API at /egress/api (the
+# grant-table door qits-deployments pushes to, qits-2620) and health at /egress/q. The PROXY
+# listener (8081, qits-2620) is not routed by any edge: callers reach it on the wire alias
+# ${QITS_ENVIRONMENT}-qits-egress:8081 on qits-net.
+host: egress
+routes: /egress
+health_path: /egress/q/health/ready
+
+# A DATABASE AND A SERVICE CLIENT.
+#   db           qits_egress: the grant table qits-deployments pushes (schema egress), one store for
+#                both replicas.
+#   idp:client   this application's own qits-idp service client, `<env>-qits-egress`: the bearer the
+#                telemetry exporters present, and the Basic pair the proxy introspects opaque tokens
+#                and exchanges platform-route bearers with.
+resources: postgresql:db:qits_egress, idp:client
+
+# TWO TASKS (qits-2610): a restart of one never takes the gateway away. Which is why there is no
+# `publishes:` and no stop-first: the deployer refuses both beside `replicas:`.
+replicas: 2
+
+# Above the drain it waits for: shutdown delay 10s + in-flight requests and tunnels up to 5m
+# (application.properties). A restart must drop no running call.
+stop_grace_period: 6m
+
+# PUBLIC, deliberately — no `exposure:` key. Its first caller, qits-edge, is on qits-net, and a
+# service sits on exactly one network (qits-2174). The consequence: it can reach PUBLIC platform
+# services only. qits-projects, qits-deployments, qits-ci and every other private service are
+# unreachable from here, which is why the grant table is PUSHED to it by qits-deployments
+# (private → public works) rather than pulled.
