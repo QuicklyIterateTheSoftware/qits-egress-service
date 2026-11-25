@@ -14,19 +14,45 @@ import io.vertx.core.json.JsonObject;
  *       subject:<sub>}.
  * </ul>
  *
+ * <p>An {@code agent:} principal keeps the token's {@code project} claim (qits-2525): an agent
+ * belongs to its project, and is granted what its project is ({@link #project()}). The printed form
+ * is still {@code agent:<agent>}, so the audit line names the agent.
+ *
  * <p>Only an {@code application:} principal matches routes: the table holds application routes only
- * (qits-2525 adds declarations for the others).
+ * (qits-2525 adds declarations for the others). A principal with a project gets the passthrough
+ * ({@code proxy/Passthrough}); an application never does.
  *
  * @param kind {@code application}, {@code agent}, {@code project} or {@code subject}
  * @param name what follows the colon
+ * @param project the project the principal belongs to: its name for a {@code project:} principal,
+ *     the token's {@code project} claim for an {@code agent:} one, null otherwise
  */
-public record Principal(String kind, String name) {
+public record Principal(String kind, String name, String project) {
 
   public static final String APPLICATION = "application";
+
+  public static final String AGENT = "agent";
+
+  public static final String PROJECT = "project";
+
+  /** A principal of no project but the one a {@code project:} principal is. */
+  public Principal(String kind, String name) {
+    this(kind, name, PROJECT.equals(kind) ? name : null);
+  }
 
   /** The application this principal is, or null when it is not one. */
   public String application() {
     return APPLICATION.equals(kind) ? name : null;
+  }
+
+  /**
+   * The project this principal belongs to — a {@code project:} principal's own name, an {@code
+   * agent:} principal's {@code project} claim — or null: an application, a subject, an agent token
+   * without a project.
+   */
+  @Override
+  public String project() {
+    return APPLICATION.equals(kind) ? null : project;
   }
 
   @Override
@@ -51,12 +77,12 @@ public record Principal(String kind, String name) {
       return new Principal(APPLICATION, subject.substring(prefix.length()));
     }
     String agent = text(claims.getValue("agent"));
-    if (agent != null) {
-      return new Principal("agent", agent);
-    }
     String project = text(claims.getValue("project"));
+    if (agent != null) {
+      return new Principal(AGENT, agent, project);
+    }
     if (project != null) {
-      return new Principal("project", project);
+      return new Principal(PROJECT, project, project);
     }
     return new Principal("subject", subject == null ? "-" : subject);
   }

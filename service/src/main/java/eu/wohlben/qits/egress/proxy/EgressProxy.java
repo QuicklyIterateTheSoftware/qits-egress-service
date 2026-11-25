@@ -32,6 +32,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import java.time.Duration;
+import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
@@ -49,13 +50,17 @@ import org.jboss.logging.Logger;
  * clients ({@link Form}, qits-2622), serves platform routes with the caller's bearer exchanged at
  * qits-idp (qits-2623), and ends the TLS of a granted {@code CONNECT} on a loopback listener of its
  * own, serving every request inside the tunnel like an absolute-form one ({@link Interception},
- * qits-2644).
+ * qits-2644). A connection spliced from a {@code GET /egress/api/forward} websocket ({@link
+ * ForwardDoor}, qits-2654) carries its caller with it ({@link ForwardedCallers}); a principal with a
+ * project reaches outside hosts no route covers through the {@link Passthrough}.
  *
  * <p>One call, in order:
  *
  * <ol>
- *   <li><b>Who</b> — {@link CallerIdentity} on {@code Authorization: Bearer}: 401 JSON when there is
- *       no credential or it is not good, 503 when the idp cannot be reached.
+ *   <li><b>Who</b> — {@link CallerIdentity} on {@code Authorization: Bearer} (the proxy forms: on
+ *       {@code Proxy-Authorization}): 401 JSON when there is no credential or it is not good, 503
+ *       when the idp cannot be reached. On a forward's connection a request WITHOUT that header is
+ *       the forward's caller; one with it is whoever the header says.
  *   <li><b>A table</b> — with none held, 503 {@code {"error":"no grant table yet"}}, reason {@code
  *       no-table}.
  *   <li><b>The grant</b> — the route {@code (caller application, <route>)} must exist and its
@@ -111,6 +116,8 @@ public class EgressProxy {
 
   @Inject LeafCertificates leaves;
 
+  @Inject Passthrough passthrough;
+
   @ConfigProperty(name = "qits.egress.proxy.port", defaultValue = "8081")
   int port;
 
@@ -138,6 +145,9 @@ public class EgressProxy {
   private HttpServer intercepting;
 
   private final Interception interception = new Interception();
+
+  /** The forwards' callers, by the loopback port their splice comes from (qits-2654). */
+  private final ForwardedCallers forwards = new ForwardedCallers();
 
   /**
    * One proxy client and its {@link UpstreamPools}: the client every call is asked of, and {@code
@@ -291,6 +301,11 @@ public class EgressProxy {
     return intercepting.actualPort();
   }
 
+  /** The forwards' callers, for {@link ForwardDoor}. */
+  ForwardedCallers forwards() {
+    return forwards;
+  }
+
   /** How many intercepted tunnels are open. */
   int interceptedTunnels() {
     return interception.open();
@@ -337,12 +352,19 @@ public class EgressProxy {
     if (gateway != null) {
       audit.route(gateway.route());
     }
-    String credential =
-        form == Form.GATEWAY
-            ? request.getHeader(HttpHeaders.AUTHORIZATION)
-            : ProxyCredential.bearer(request.getHeader(HttpHeaders.PROXY_AUTHORIZATION));
-    callers
-        .identify(credential)
+    ForwardedCallers.Forward forward = forwards.of(request.connection());
+    if (forward != null) {
+      audit.forwarded();
+    }
+    String presented =
+        request.getHeader(
+            form == Form.GATEWAY ? HttpHeaders.AUTHORIZATION : HttpHeaders.PROXY_AUTHORIZATION);
+    String credential = form == Form.GATEWAY ? presented : ProxyCredential.bearer(presented);
+    // Over a forward, a request that names no credential of its own is the forward's caller; one
+    // that does (a Claude launch sends the agent's own token) is whoever that credential says.
+    boolean asForwarded = forward != null && presented == null;
+    String bearer = asForwarded ? forward.bearer() : rawBearer(credential);
+    (asForwarded ? Future.succeededFuture(forward.verdict()) : callers.identify(credential))
         .onComplete(
             result -> {
               if (result.failed()) {
@@ -367,7 +389,7 @@ public class EgressProxy {
                 return;
               }
               audit.principal(verdict.principal());
-              Call call = new Call(request, audit, exchange, verdict, rawBearer(credential));
+              Call call = new Call(request, audit, exchange, verdict, bearer, forward != null);
               switch (form) {
                 case GATEWAY -> route(call, gateway);
                 case ABSOLUTE -> absolute(call, absolute);
@@ -378,14 +400,16 @@ public class EgressProxy {
 
   /**
    * One identified call on its way: the request, its audit line and exchange, who the caller is and
-   * the bearer it presented (a platform route exchanges it; nothing else reads it).
+   * the bearer it presented (a platform route exchanges it; nothing else reads it), and whether it
+   * came over a forward.
    */
   record Call(
       HttpServerRequest request,
       AuditLine audit,
       InFlight.Exchange exchange,
       CallerIdentity.Verdict verdict,
-      String bearer) {}
+      String bearer,
+      boolean forwarded) {}
 
   /** The token of a {@code Bearer …} value. */
   static String rawBearer(String authorization) {
@@ -443,8 +467,11 @@ public class EgressProxy {
       return;
     }
     audit.target(target.host(), target.path());
+    // A plain-http target no route covers may pass through for a principal with a project; never
+    // an https one (a proxy client tunnels those with CONNECT), so never a request inside a tunnel.
+    boolean mayPass = target.scheme().equals("http") && passthrough.applies(verdict.principal());
     GrantIndex.Table table = grants.current();
-    if (table == null) {
+    if (table == null && !mayPass) {
       refuse(request, audit, 503, "no-table", error("no grant table yet"));
       return;
     }
@@ -453,8 +480,11 @@ public class EgressProxy {
       return;
     }
     String method = request.method().name();
-    GrantRoute route =
-        target.match(table.routes(verdict.principal().application()));
+    GrantRoute route = target.match(routes(table, verdict));
+    if (route == null && mayPass) {
+      passthroughHttp(call, target);
+      return;
+    }
     if (route == null || !route.methods().contains(method)) {
       if (route != null) {
         audit.route(route.name());
@@ -490,8 +520,9 @@ public class EgressProxy {
       return;
     }
     audit.target(authority.toString(), "-");
+    boolean mayPass = passthrough.applies(verdict.principal());
     GrantIndex.Table table = grants.current();
-    if (table == null) {
+    if (table == null && !mayPass) {
       refuse(request, audit, 503, "no-table", error("no grant table yet"));
       return;
     }
@@ -499,7 +530,7 @@ public class EgressProxy {
     GrantRoute granted = null;
     // By name, so which route a refusal names does not depend on a map's order.
     List<GrantRoute> candidates =
-        table.routes(verdict.principal().application()).stream()
+        routes(table, verdict).stream()
             .sorted(java.util.Comparator.comparing(GrantRoute::name))
             .toList();
     for (GrantRoute route : candidates) {
@@ -513,6 +544,10 @@ public class EgressProxy {
         granted = route;
         break;
       }
+    }
+    if (granted == null && reached == null && mayPass) {
+      passthroughConnect(call, authority);
+      return;
     }
     if (granted == null) {
       if (reached != null) {
@@ -557,7 +592,7 @@ public class EgressProxy {
         call.request(),
         intercepting.actualPort(),
         interception,
-        new Interception.Tunnel(call.verdict(), authority, route.name()),
+        new Interception.Tunnel(call.verdict(), authority, route.name(), call.forwarded()),
         call.exchange(),
         audit);
   }
@@ -587,6 +622,9 @@ public class EgressProxy {
       return;
     }
     audit.principal(tunnel.verdict().principal());
+    if (tunnel.forwarded()) {
+      audit.forwarded();
+    }
     String sni = Interception.sniHost(request.connection());
     audit.target(sni == null ? tunnel.authority().host() : sni, path);
     if (sni == null
@@ -603,13 +641,112 @@ public class EgressProxy {
     }
     String query = request.query();
     absolute(
-        new Call(request, audit, exchange, tunnel.verdict(), null),
+        new Call(request, audit, exchange, tunnel.verdict(), null, tunnel.forwarded()),
         new AbsoluteTarget(
             "https",
             sni,
             tunnel.authority().port(),
             path,
             query == null || query.isEmpty() ? null : query));
+  }
+
+  /** The routes the caller holds in {@code table}, none when there is no table. */
+  private static Collection<GrantRoute> routes(GrantIndex.Table table, CallerIdentity.Verdict verdict) {
+    return table == null ? List.of() : table.routes(verdict.principal().application());
+  }
+
+  /**
+   * A {@code CONNECT} no route reaches, for a principal with a project: a BLIND splice to the
+   * checked address ({@link Passthrough}), or {@code 403 passthrough refused}. Audited {@code
+   * decision=ALLOW route=- ... passthrough=true} when the tunnel closes.
+   */
+  private void passthroughConnect(Call call, ConnectTunnel.Authority authority) {
+    HttpServerRequest request = call.request();
+    AuditLine audit = call.audit();
+    if (!passthrough.connectPort(authority.port())) {
+      refusePassthrough(call, Passthrough.PORT, authority.toString());
+      return;
+    }
+    passthrough
+        .check(authority.host(), authority.port())
+        .onComplete(
+            result -> {
+              Passthrough.Outcome outcome =
+                  result.succeeded() ? result.result() : Passthrough.Outcome.refused(Passthrough.UNRESOLVED);
+              if (outcome.checked() == null) {
+                refusePassthrough(call, outcome.refusal(), authority.toString());
+                return;
+              }
+              audit.allow().passthrough();
+              tunnels.blind(request, outcome.checked().dial(), authority, call.exchange(), audit);
+            });
+  }
+
+  /**
+   * An absolute-form {@code http://} request no route covers, for a principal with a project: sent
+   * on as it came to the checked address ({@link Passthrough}, {@link PassthroughOutbound}) — the
+   * caller's own {@code Authorization} and {@code Cookie} kept — or {@code 403 passthrough
+   * refused}.
+   */
+  private void passthroughHttp(Call call, AbsoluteTarget target) {
+    HttpServerRequest request = call.request();
+    AuditLine audit = call.audit();
+    if (!passthrough.httpPort(target.port())) {
+      refusePassthrough(call, Passthrough.PORT, target.origin());
+      return;
+    }
+    passthrough
+        .check(target.host(), target.port())
+        .onComplete(
+            result -> {
+              Passthrough.Outcome outcome =
+                  result.succeeded() ? result.result() : Passthrough.Outcome.refused(Passthrough.UNRESOLVED);
+              if (outcome.checked() == null) {
+                refusePassthrough(call, outcome.refusal(), target.origin());
+                return;
+              }
+              audit.allow().passthrough();
+              String uri =
+                  target.query() == null || target.query().isEmpty()
+                      ? target.path()
+                      : target.path() + "?" + target.query();
+              RequestOptions options =
+                  new RequestOptions()
+                      .setHost(target.host())
+                      .setPort(target.port())
+                      .setServer(outcome.checked().dial())
+                      .setSsl(false)
+                      .setConnectTimeout(ProxyClients.ACQUIRE_TIMEOUT_MS);
+              UpstreamOrigin dialled = new UpstreamOrigin(target.host(), target.port());
+              String authority = target.host() + ":" + target.port();
+              Pool pool = isStream(request) ? stream : ordinary;
+              HttpProxy.reverseProxy(new ProxyOptions().setSupportWebSocket(false), pool.client())
+                  .origin(origin(options, dialled, authority, pool, pool.client()))
+                  .addInterceptor(new PassthroughOutbound(target, uri, audit))
+                  .addInterceptor(new EdgeHopByHop())
+                  .addInterceptor(new EdgeRequestFraming())
+                  .addInterceptor(
+                      new UpstreamRetry(authority, origin(options, dialled, authority, pool, pool.fresh())))
+                  .handle(request);
+            });
+  }
+
+  /**
+   * A passthrough refusal: 403 {@code {"error":"passthrough refused","reason":…}}, audit reason
+   * {@code passthrough-<reason>}; a name that does not resolve is 502.
+   */
+  private static void refusePassthrough(Call call, String reason, String target) {
+    boolean unresolved = Passthrough.UNRESOLVED.equals(reason);
+    refuse(
+        call.request(),
+        call.audit(),
+        unresolved ? 502 : 403,
+        "passthrough-" + reason,
+        new JsonObject()
+            .put("error", unresolved ? "the target cannot be resolved" : "passthrough refused")
+            .put("reason", reason)
+            .put("principal", call.verdict().principal().toString())
+            .put("target", target));
   }
 
   /** The 403 body: who asked for what. */
@@ -756,11 +893,21 @@ public class EgressProxy {
    * failure.
    */
   private static OriginRequestProvider origin(GrantRoute route, Pool pool, HttpClient client) {
-    UpstreamOrigin dialled = new UpstreamOrigin(route.host(), route.dialPort());
+    return origin(
+        originOptions(route),
+        new UpstreamOrigin(route.host(), route.dialPort()),
+        route.authority(),
+        pool,
+        client);
+  }
+
+  /** {@link #origin(GrantRoute, Pool, HttpClient)} for any request options. */
+  private static OriginRequestProvider origin(
+      RequestOptions options, UpstreamOrigin dialled, String authority, Pool pool, HttpClient client) {
     return context -> {
       UpstreamLease lease = UpstreamLease.of(context.request().proxiedRequest());
       long since = pool.pools().acquiring();
-      Future<HttpClientRequest> request = client.request(originOptions(route));
+      Future<HttpClientRequest> request = client.request(new RequestOptions(options));
       return request
           .onSuccess(granted -> pool.pools().granted(dialled, since, granted, lease, false))
           .onFailure(
@@ -768,7 +915,7 @@ public class EgressProxy {
                 pool.pools().failed(dialled, since);
                 LOG.warnf(
                     "no upstream connection to %s from the %s pool: %s",
-                    route.authority(), pool.pools().pool(), failure.toString());
+                    authority, pool.pools().pool(), failure.toString());
               });
     };
   }

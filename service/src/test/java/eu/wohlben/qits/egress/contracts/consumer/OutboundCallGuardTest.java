@@ -82,7 +82,10 @@ class OutboundCallGuardTest {
               "a granted route's WebSocket handshake to its third-party target: no qits service"),
           Map.entry(
               "eu.wohlben.qits.egress.proxy.ConnectTunnel",
-              "a CONNECT tunnel's loopback connection (a Vert.x NetClient) to the interception" + " listener on 127.0.0.1: no qits service"),
+              "a CONNECT tunnel's loopback connection (a Vert.x NetClient) to the interception" + " listener on 127.0.0.1, or a passthrough tunnel's to the checked public address of a" + " third party: no qits service"),
+          Map.entry(
+              "eu.wohlben.qits.egress.proxy.ForwardDoor",
+              "a forward's loopback connection (a Vert.x NetClient) to this process' own proxy" + " listener on 127.0.0.1: no qits service"),
           Map.entry(
               "eu.wohlben.qits.egress.tls.LeafDoor",
               "qits-certificates issueLeaf (CertificatesPactTest LEAF_ISSUED)"),

@@ -36,8 +36,14 @@ final class Interception {
    * @param verdict the caller, as the {@code CONNECT}'s {@code Proxy-Authorization} identified it
    * @param authority the {@code CONNECT}'s {@code host:port}
    * @param route the route that granted the {@code CONNECT}
+   * @param forwarded whether the {@code CONNECT} came over a forward ({@link ForwardedCallers}):
+   *     every request inside is audited {@code via=forward} too
    */
-  record Tunnel(CallerIdentity.Verdict verdict, ConnectTunnel.Authority authority, String route) {}
+  record Tunnel(
+      CallerIdentity.Verdict verdict,
+      ConnectTunnel.Authority authority,
+      String route,
+      boolean forwarded) {}
 
   private final Map<Integer, Tunnel> byPort = new ConcurrentHashMap<>();
 

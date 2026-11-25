@@ -8,6 +8,7 @@ import io.vertx.core.http.HttpServerResponse;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.net.NetClient;
 import io.vertx.core.net.NetClientOptions;
+import io.vertx.core.net.SocketAddress;
 import java.util.Locale;
 import org.jboss.logging.Logger;
 
@@ -21,6 +22,10 @@ import org.jboss.logging.Logger;
  *
  * <p>The tunnel's exchange is held until its sockets close, so a drain waits for it; the loopback
  * connection's {@link Interception.Tunnel} entry is removed at the same moment.
+ *
+ * <p>A {@link Passthrough} tunnel (qits-2525, qits-2654) is the other kind: {@link #blind}, the raw
+ * splice to the target that every tunnel was before qits-2644 — to the address the passthrough
+ * checked, never the name again — with nothing intercepted and nothing injected.
  */
 final class ConnectTunnel {
 
@@ -154,6 +159,54 @@ final class ConnectTunnel {
                       inbound -> {
                         WebSocketSplice.splice(
                             inbound, outbound, exchange, () -> interception.release(localPort, tunnel));
+                        outbound.resume();
+                      });
+            });
+  }
+
+  /**
+   * A passthrough tunnel: dial {@code dial} — the checked address — then answer {@code 200
+   * Connection Established} and splice the caller to it, bytes as they come. A target that does
+   * not answer is 502.
+   */
+  void blind(
+      HttpServerRequest request,
+      SocketAddress dial,
+      Authority authority,
+      InFlight.Exchange exchange,
+      AuditLine audit) {
+    client
+        .connect(dial)
+        .onFailure(
+            failure -> {
+              LOG.warnf("no passthrough tunnel to %s: %s", authority, failure.toString());
+              request.resume();
+              HttpServerResponse response = request.response();
+              if (!response.ended() && !response.closed()) {
+                response
+                    .setStatusCode(502)
+                    .putHeader(HttpHeaders.CONTENT_TYPE, "application/json")
+                    .end(new JsonObject().put("error", "the target cannot be reached").encode());
+              }
+            })
+        .onSuccess(
+            outbound -> {
+              audit.upstreamAnswered();
+              outbound.pause();
+              exchange.splice();
+              request.resume();
+              request.response().setStatusMessage("Connection Established");
+              request
+                  .toNetSocket()
+                  .onFailure(
+                      failure -> {
+                        outbound.close();
+                        exchange.settle();
+                        LOG.errorf(failure, "could not take over the caller's connection for a passthrough tunnel to %s", authority);
+                      })
+                  .onSuccess(
+                      inbound -> {
+                        WebSocketSplice.splice(inbound, outbound, exchange);
                         outbound.resume();
                       });
             });

@@ -15,7 +15,9 @@ import org.jboss.logging.Logger;
  *
  * <p>(one line; wrapped here). A call inside an intercepted {@code CONNECT} tunnel (qits-2644)
  * ends in {@code tls=intercepted}; the {@code CONNECT} itself in {@code tls=intercepted
- * leafSerial=<hex>}, the leaf the tunnel's handshake is served. It never carries a header value, a query value, a body or a secret:
+ * leafSerial=<hex>}, the leaf the tunnel's handshake is served. A call let through by the
+ * passthrough (qits-2654) carries {@code passthrough=true}; a call carried over a {@code GET
+ * /egress/api/forward} websocket, {@code via=forward}. It never carries a header value, a query value, a body or a secret:
  * the fields are the principal, the route name, the method, the target host, the path without its
  * query, the status — the upstream's for an allowed call, the gateway's own otherwise — and the
  * reason a call was refused. Every field the caller influences is reduced to a safe alphabet, so a
@@ -55,6 +57,10 @@ final class AuditLine {
   private volatile boolean intercepted;
 
   private volatile String leafSerial;
+
+  private volatile boolean passthrough;
+
+  private volatile boolean forwarded;
 
   AuditLine(String method, String path) {
     this.method = method;
@@ -112,6 +118,18 @@ final class AuditLine {
     return this;
   }
 
+  /** The call goes out by the passthrough, no route: {@code passthrough=true} when allowed. */
+  AuditLine passthrough() {
+    this.passthrough = true;
+    return this;
+  }
+
+  /** The call came over a forward's websocket: {@code via=forward}. */
+  AuditLine forwarded() {
+    this.forwarded = true;
+    return this;
+  }
+
   /** Whether the line is written already. */
   boolean written() {
     return written.get();
@@ -157,7 +175,9 @@ final class AuditLine {
         + " reason="
         + clean(why)
         + (intercepted ? " tls=intercepted" : "")
-        + (leafSerial != null ? " leafSerial=" + clean(leafSerial) : "");
+        + (leafSerial != null ? " leafSerial=" + clean(leafSerial) : "")
+        + (passthrough && allowed ? " passthrough=true" : "")
+        + (forwarded ? " via=forward" : "");
   }
 
   static String clean(String value) {
