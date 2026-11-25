@@ -204,8 +204,9 @@ qits-egress itself (principal `application:qits-egress`). When the table in forc
 host's leaf is held (it waits up to 2 minutes for pre-issue), the egress
 
 1. reads the platform anchors, `GET ${qits.egress.certificates-url}/api/anchors` with `Accept:
-   application/json` (a public door; each anchor's `subject` and the `sha256` of its DER
-   certificate, pacted as `one ACTIVE anchor`);
+   application/json` and `Authorization: Bearer <its own qits client token>` (the door is
+   `@PermitAll`, but the edge in front of it answers 401 without a bearer); each anchor's `subject`
+   and the `sha256` of its DER certificate, pacted as `one ACTIVE anchor`;
 2. opens `CONNECT api.hetzner.cloud:443` on its own `127.0.0.1:8081` with `Proxy-Authorization:
    Bearer <its own qits client token>`;
 3. handshakes inside the tunnel trusting **only** those anchors (`tls/AnchorTrust`: a certificate of

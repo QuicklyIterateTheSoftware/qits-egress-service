@@ -179,6 +179,46 @@ class TlsSelfCheckTest {
   }
 
   @Test
+  void theAnchorsFetchCarriesTheBearer() throws Exception {
+    io.vertx.core.Vertx vertx = io.vertx.core.Vertx.vertx();
+    try {
+      AtomicReference<String> authorization = new AtomicReference<>();
+      AtomicReference<String> accept = new AtomicReference<>();
+      io.vertx.core.http.HttpServer server =
+          vertx
+              .createHttpServer()
+              .requestHandler(
+                  request -> {
+                    authorization.set(request.getHeader("Authorization"));
+                    accept.set(request.getHeader("Accept"));
+                    request
+                        .response()
+                        .putHeader("Content-Type", "application/json")
+                        .end(
+                            "{\"version\":\"v1\",\"anchors\":[{\"subject\":\"CN=a\","
+                                + "\"sha256\":\"ab12\"}]}");
+                  })
+              .listen(0, "127.0.0.1")
+              .toCompletionStage()
+              .toCompletableFuture()
+              .get(10, java.util.concurrent.TimeUnit.SECONDS);
+      TlsSelfCheck.Anchors anchors =
+          TlsSelfCheck.anchors(
+                  vertx.createHttpClient(),
+                  "http://127.0.0.1:" + server.actualPort() + "/certificates/",
+                  10_000,
+                  "egress-own-token")
+              .toCompletableFuture()
+              .get(10, java.util.concurrent.TimeUnit.SECONDS);
+      assertEquals("Bearer egress-own-token", authorization.get());
+      assertEquals("application/json", accept.get());
+      assertEquals(Map.of("ab12", "CN=a"), anchors.anchors());
+    } finally {
+      vertx.close().toCompletionStage().toCompletableFuture().get(10, java.util.concurrent.TimeUnit.SECONDS);
+    }
+  }
+
+  @Test
   void theAnchorsAnswerIsReadForItsDigestsAndSubjects() {
     TlsSelfCheck.Anchors anchors =
         TlsSelfCheck.anchors(

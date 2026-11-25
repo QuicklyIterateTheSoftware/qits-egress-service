@@ -28,7 +28,9 @@ import org.junit.jupiter.api.Test;
  * POST /certificates/api/leaves}, tls/LeafDoor), pre-issued when a grant table is adopted, renewed
  * at two thirds of its life, and asked inline by a CONNECT with no leaf; and the published anchors
  * ({@code GET /certificates/api/anchors} as JSON, tls/TlsSelfCheck), the only trust of the TLS
- * self-check (qits-2644).
+ * self-check (qits-2644). That call carries the egress' own bearer for the edge in front of the door;
+ * the provider's door is {@code @PermitAll}, so the row binds no {@code Authorization} and the
+ * header rides along unrecorded.
  *
  * <p>The row is driven through the real {@link LeafDoor#post} with the state's own CSR — the one the
  * provider recorded, since a CSR this process builds carries a fresh key and a fresh signature —
@@ -105,7 +107,8 @@ class CertificatesPactTest {
           Vertx vertx = Vertx.vertx();
           try {
             TlsSelfCheck.Anchors anchors =
-                TlsSelfCheck.anchors(vertx.createHttpClient(), url + "/certificates", 10_000)
+                TlsSelfCheck.anchors(
+                        vertx.createHttpClient(), url + "/certificates", 10_000, "contract")
                     .toCompletableFuture()
                     .get(20, TimeUnit.SECONDS);
             assertEquals(1, anchors.anchors().size());

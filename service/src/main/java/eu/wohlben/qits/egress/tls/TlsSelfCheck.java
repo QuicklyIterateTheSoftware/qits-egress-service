@@ -55,7 +55,8 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  *
  * <ol>
  *   <li>reads the platform anchors, {@code GET <certificates-url>/api/anchors} as JSON (each
- *       anchor's subject and the SHA-256 of its certificate; the door is public);
+ *       anchor's subject and the SHA-256 of its certificate) with its own {@code qits} bearer — the
+ *       door is public, the edge in front of it is not;
  *   <li>opens {@code CONNECT <host>:<port>} on its own proxy listener ({@code 127.0.0.1:8081}) with
  *       {@code Proxy-Authorization: Bearer <its own qits client token>};
  *   <li>handshakes inside the tunnel trusting ONLY those anchors ({@link AnchorTrust}: the chain
@@ -225,14 +226,27 @@ public class TlsSelfCheck {
     }
   }
 
-  /** {@code GET <certificates-url>/api/anchors} as JSON: the door is public, no bearer is sent. */
+  /**
+   * {@code GET <certificates-url>/api/anchors} as JSON, with this service's own {@code qits} bearer
+   * (the one {@link LeafBearer} mints for the leaf door). The door itself is {@code @PermitAll},
+   * but the edge in front of it answers 401 to a request without a bearer.
+   */
   CompletionStage<Anchors> anchors() {
-    return anchors(client, certificatesUrl, timeout.toMillis());
+    return bearer
+        .token()
+        .thenCompose(
+            token -> {
+              if (token.isEmpty()) {
+                return CompletableFuture.failedFuture(
+                    new CheckFailed("this process holds no qits client token"));
+              }
+              return anchors(client, certificatesUrl, timeout.toMillis(), token.get());
+            });
   }
 
-  /** The anchors door, asked on {@code client}. */
+  /** The anchors door, asked on {@code client} with {@code Authorization: Bearer <token>}. */
   public static CompletionStage<Anchors> anchors(
-      HttpClient client, String certificatesUrl, long timeoutMs) {
+      HttpClient client, String certificatesUrl, long timeoutMs, String token) {
     String base = certificatesUrl;
     while (base.endsWith("/")) {
       base = base.substring(0, base.length() - 1);
@@ -243,7 +257,8 @@ public class TlsSelfCheck {
             .setAbsoluteURI(base + "/api/anchors")
             .setConnectTimeout(timeoutMs)
             .setTimeout(timeoutMs)
-            .putHeader(HttpHeaders.ACCEPT, "application/json");
+            .putHeader(HttpHeaders.ACCEPT, "application/json")
+            .putHeader(HttpHeaders.AUTHORIZATION, "Bearer " + token);
     return client
         .request(options)
         .compose(request -> request.send())
