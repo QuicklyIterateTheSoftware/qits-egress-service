@@ -1,0 +1,110 @@
+package eu.wohlben.qits.egress.tls;
+
+import eu.wohlben.qits.egress.grants.GrantIndex;
+import eu.wohlben.qits.egress.grants.GrantTableAdopted;
+import io.quarkus.runtime.ShutdownEvent;
+import io.quarkus.runtime.StartupEvent;
+import io.vertx.core.Vertx;
+import io.vertx.core.http.HttpClient;
+import io.vertx.core.http.HttpClientOptions;
+import jakarta.annotation.PostConstruct;
+import jakarta.enterprise.event.Observes;
+import jakarta.enterprise.inject.Produces;
+import jakarta.inject.Inject;
+import jakarta.inject.Singleton;
+import java.time.Clock;
+import java.time.Duration;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
+
+/**
+ * Builds this replica's {@link LeafCertificates} on {@link LeafDoor} and keeps it fed:
+ *
+ * <ul>
+ *   <li>every {@link GrantTableAdopted} — a push taken here, a refresh that read a moved version,
+ *       the table loaded at boot — hands it the table's https hosts to pre-issue for;
+ *   <li>at startup the table already in force, should it have been adopted before this observer
+ *       existed;
+ *   <li>a periodic {@link LeafCertificates#tick} every {@code qits.egress.leaves.check-interval}
+ *       drives renewal and the retries.
+ * </ul>
+ *
+ * <p>Nothing here gates readiness: a replica with no leaf serves every non-intercepted call.
+ */
+@Singleton
+public class LeafWiring {
+
+  @Inject Vertx vertx;
+
+  @Inject GrantIndex index;
+
+  @Inject LeafBearer bearer;
+
+  @ConfigProperty(name = "qits.egress.certificates-url")
+  String certificatesUrl;
+
+  @ConfigProperty(name = "qits.egress.leaves.renew-fraction", defaultValue = "0.6667")
+  double renewFraction;
+
+  @ConfigProperty(name = "qits.egress.leaves.concurrency", defaultValue = "4")
+  int concurrency;
+
+  @ConfigProperty(name = "qits.egress.leaves.backoff-min", defaultValue = "30s")
+  Duration backoffMin;
+
+  @ConfigProperty(name = "qits.egress.leaves.backoff-max", defaultValue = "10m")
+  Duration backoffMax;
+
+  @ConfigProperty(name = "qits.egress.leaves.timeout", defaultValue = "10s")
+  Duration timeout;
+
+  @ConfigProperty(name = "qits.egress.leaves.check-interval", defaultValue = "5s")
+  Duration checkInterval;
+
+  private HttpClient client;
+
+  private LeafCertificates leaves;
+
+  private long timer = -1;
+
+  @PostConstruct
+  void build() {
+    // A small client of its own, never the proxy's; TLS by the JVM trust store (quarkus.ssl.native).
+    client = vertx.createHttpClient(new HttpClientOptions().setKeepAlive(true).setVerifyHost(true));
+    LeafDoor door =
+        new LeafDoor(vertx, client, certificatesUrl, bearer::token, timeout.toMillis());
+    leaves =
+        new LeafCertificates(
+            door,
+            Clock.systemUTC(),
+            new LeafCertificates.Settings(
+                renewFraction, concurrency, backoffMin, backoffMax, timeout));
+  }
+
+  /** This replica's leaves, for the interception listener (qits-2622's CONNECT). */
+  @Produces
+  @Singleton
+  LeafCertificates leafCertificates() {
+    return leaves;
+  }
+
+  void onTable(@Observes GrantTableAdopted adopted) {
+    leaves.want(LeafCertificates.httpsHosts(adopted.table()));
+  }
+
+  void start(@Observes StartupEvent ignored) {
+    GrantIndex.Table current = index.current();
+    if (current != null) {
+      leaves.want(LeafCertificates.httpsHosts(current));
+    }
+    timer = vertx.setPeriodic(checkInterval.toMillis(), id -> leaves.tick());
+  }
+
+  void stop(@Observes ShutdownEvent ignored) {
+    if (timer >= 0) {
+      vertx.cancelTimer(timer);
+    }
+    if (client != null) {
+      client.close();
+    }
+  }
+}

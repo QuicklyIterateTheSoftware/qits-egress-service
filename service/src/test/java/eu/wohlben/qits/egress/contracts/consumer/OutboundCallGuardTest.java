@@ -55,28 +55,43 @@ class OutboundCallGuardTest {
 
   /** Who may dial, and what each one's calls are. */
   static final Map<String, String> DIALLERS =
-      Map.of(
-          "eu.wohlben.qits.egress.identity.CallerIdentity",
-          "builds the idp client IdpKeys and IdpIntrospection share",
-          "eu.wohlben.qits.egress.identity.IdpKeys",
-          "qits-idp getOpenIdConfiguration and getJwks (IdpPactTest DISCOVERY, JWKS)",
-          "eu.wohlben.qits.egress.identity.IdpIntrospection",
-          "qits-idp introspectToken (IdpPactTest INTROSPECT, INTROSPECT_DELETED)",
-          "eu.wohlben.qits.egress.identity.IdpTokenExchange",
-          "qits-idp issueToken, token exchange (IdpPactTest EXCHANGE_PERSON, EXCHANGE_COMMISSIONED,"
-              + " EXCHANGE_NOT_ACTOR, EXCHANGE_CHAINED)",
-          "eu.wohlben.qits.egress.identity.PlatformBearers",
-          "builds the client IdpTokenExchange dials with",
-          "eu.wohlben.qits.egress.proxy.EgressProxy",
-          "the proxied call to a granted route's target: a third party, or a public platform"
-              + " service passing the caller's own request through",
-          "eu.wohlben.qits.egress.proxy.ProxyClients",
-          "builds the proxy's upstream client",
-          "eu.wohlben.qits.egress.proxy.WebSocketSplice",
-          "a granted route's WebSocket handshake to its third-party target: no qits service",
-          "eu.wohlben.qits.egress.proxy.ConnectTunnel",
-          "a CONNECT tunnel (a Vert.x NetClient) to a granted route's third-party target: no qits"
-              + " service, never a platform route");
+      Map.ofEntries(
+          Map.entry(
+              "eu.wohlben.qits.egress.identity.CallerIdentity",
+              "builds the idp client IdpKeys and IdpIntrospection share"),
+          Map.entry(
+              "eu.wohlben.qits.egress.identity.IdpKeys",
+              "qits-idp getOpenIdConfiguration and getJwks (IdpPactTest DISCOVERY, JWKS)"),
+          Map.entry(
+              "eu.wohlben.qits.egress.identity.IdpIntrospection",
+              "qits-idp introspectToken (IdpPactTest INTROSPECT, INTROSPECT_DELETED)"),
+          Map.entry(
+              "eu.wohlben.qits.egress.identity.IdpTokenExchange",
+              "qits-idp issueToken, token exchange (IdpPactTest EXCHANGE_PERSON, EXCHANGE_COMMISSIONED," + " EXCHANGE_NOT_ACTOR, EXCHANGE_CHAINED)"),
+          Map.entry(
+              "eu.wohlben.qits.egress.identity.PlatformBearers",
+              "builds the client IdpTokenExchange dials with"),
+          Map.entry(
+              "eu.wohlben.qits.egress.proxy.EgressProxy",
+              "the proxied call to a granted route's target: a third party, or a public platform" + " service passing the caller's own request through"),
+          Map.entry(
+              "eu.wohlben.qits.egress.proxy.ProxyClients",
+              "builds the proxy's upstream client"),
+          Map.entry(
+              "eu.wohlben.qits.egress.proxy.WebSocketSplice",
+              "a granted route's WebSocket handshake to its third-party target: no qits service"),
+          Map.entry(
+              "eu.wohlben.qits.egress.proxy.ConnectTunnel",
+              "a CONNECT tunnel (a Vert.x NetClient) to a granted route's third-party target: no qits" + " service, never a platform route"),
+          Map.entry(
+              "eu.wohlben.qits.egress.tls.LeafDoor",
+              "qits-certificates issueLeaf (CertificatesPactTest LEAF_ISSUED)"),
+          Map.entry(
+              "eu.wohlben.qits.egress.tls.LeafWiring",
+              "builds the client LeafDoor dials with"),
+          Map.entry(
+              "eu.wohlben.qits.egress.tls.LeafBearer",
+              "the `qits` client's mint (IdpPactTest MINT)"));
 
   private static final JavaClasses PRODUCTION =
       new ClassFileImporter()

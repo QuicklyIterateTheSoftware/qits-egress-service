@@ -22,6 +22,8 @@ userflows: qits-egress
 #                          identity reads too), the `qits` client's mint, and the opaque-token
 #                          introspection (contracts/consumer/IdpPactTest, IdpTokenMintPactTest,
 #                          IdpIntrospectionPactTest).
+#   qits-certificates-service  the per-host leaf, POST /certificates/api/leaves, state `leaf issued`
+#                          (contracts/consumer/CertificatesPactTest; tls/LeafDoor, qits-2643).
 #
 # No entity map and no entity diagram: the grant table is stored by plain JDBC (one row, a JSON
 # body), so there is no @Entity to map.
@@ -30,3 +32,4 @@ contracts:
   golden-masters: { from: golden-masters/, packages: [maven, npm] }
   pacts:
     qits-idp-service: { packages: [maven] }
+    qits-certificates-service: { packages: [maven] }

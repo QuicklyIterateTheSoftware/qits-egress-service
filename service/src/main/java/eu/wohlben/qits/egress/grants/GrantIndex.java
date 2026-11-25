@@ -7,6 +7,7 @@ import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
 import io.vertx.core.Vertx;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Event;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import java.io.IOException;
@@ -68,6 +69,9 @@ public class GrantIndex {
   @Inject ObjectMapper json;
 
   @Inject Vertx vertx;
+
+  /** Told whenever a table replaces the one in memory (the tls leaves pre-issue on it). */
+  @Inject Event<GrantTableAdopted> adopted;
 
   @ConfigProperty(name = "qits.egress.grants.refresh", defaultValue = "5s")
   Duration refresh;
@@ -150,6 +154,7 @@ public class GrantIndex {
             row -> {
               current = index(parse(row.body()), allowPlainHttp, platformOrigin);
               LOG.infof("enforcing %s", describe(current));
+              announce(current);
             },
             () -> current = null);
   }
@@ -165,6 +170,16 @@ public class GrantIndex {
     }
     current = index(table, allowPlainHttp, platformOrigin);
     LOG.infof("enforcing %s", describe(current));
+    announce(current);
+  }
+
+  /** Fire {@link GrantTableAdopted}; an observer that throws never undoes the adoption. */
+  private void announce(Table table) {
+    try {
+      adopted.fire(new GrantTableAdopted(table));
+    } catch (RuntimeException e) {
+      LOG.warnf("an observer of grant table %d failed: %s", table.version(), e);
+    }
   }
 
   /** The stored body as the wire type. */

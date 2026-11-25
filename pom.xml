@@ -23,7 +23,7 @@
          ranges: qits-maintenance bumps each one. -->
     <groupId>eu.wohlben.qits</groupId>
     <artifactId>qits-egress</artifactId>
-    <version>2026.1125.125303</version>
+    <version>2026.1125.145427</version>
     <packaging>pom</packaging>
     <name>qits-egress</name>
 
@@ -67,6 +67,10 @@
              and what the provider answers in each provider state. -->
         <qits.pact-consumer.version>2026.1106.507</qits.pact-consumer.version>
         <qits.idp-golden-masters.version>2026.1125.71255</qits.idp-golden-masters.version>
+        <!-- The consumer pact against qits-certificates-service (test scope): its `leaf issued`
+             state, what tls/LeafDoor asks for a per-host leaf (qits-2643). A first adoption, pinned
+             by hand; maintenance's bumps move it from here on. -->
+        <qits.certificates-golden-masters.version>2026.1125.100217</qits.certificates-golden-masters.version>
         <qits.maven.repository.url>https://registry.qits.wohlben.eu/artifacts/maven/maven</qits.maven.repository.url>
         <!-- Real PostgreSQL binaries as a maven dependency, spawned by the suite: a clone tests
              green with NO DOCKER, so no Testcontainers and no dev services. -->
@@ -119,6 +123,11 @@
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-idp-golden-masters</artifactId>
                 <version>${qits.idp-golden-masters.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-certificates-golden-masters</artifactId>
+                <version>${qits.certificates-golden-masters.version}</version>
             </dependency>
             <dependency>
                 <groupId>${project.groupId}</groupId>

@@ -6,7 +6,7 @@
     <parent>
         <groupId>eu.wohlben.qits</groupId>
         <artifactId>qits-egress</artifactId>
-        <version>2026.1125.125303</version>
+        <version>2026.1125.145427</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
     <!-- The deployable: health and the management API under /egress (port 8080, behind the public
@@ -39,6 +39,20 @@
                  platform BOM. -->
             <groupId>io.vertx</groupId>
             <artifactId>vertx-http-proxy</artifactId>
+        </dependency>
+        <dependency>
+            <!-- tls/LeafKeys: the PKCS#10 CSR of a per-host leaf (JcaPKCS10CertificationRequestBuilder)
+                 and the SAN read of the answer. The version is the Quarkus BOM's, the same as
+                 bcprov's below. NOT registered as a JCA provider: keys and signatures are SunEC's. -->
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcpkix-jdk18on</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Declared DIRECTLY next to bcpkix, as qits-edge and qits-certificates declare it: the
+                 ASN.1 types bcpkix builds with, seen by the native image as an application
+                 dependency. -->
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk18on</artifactId>
         </dependency>
         <dependency>
             <!-- /egress/q/health/ready, with a readiness check for the datasource. -->
@@ -128,6 +142,12 @@
         <dependency>
             <groupId>${project.groupId}</groupId>
             <artifactId>qits-idp-golden-masters</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- The consumer pact against qits-certificates-service's leaf door (tls/, qits-2643). -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-certificates-golden-masters</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
