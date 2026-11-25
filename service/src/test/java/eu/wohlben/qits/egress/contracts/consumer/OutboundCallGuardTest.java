@@ -33,9 +33,10 @@ import org.junit.jupiter.api.Test;
  *       the tenant's discovery and JWKS reads are rowed.
  * </ul>
  *
- * <p>Not seen here, because a library makes them: the OTLP export. Not a qits service, so no pact:
- * the proxy's upstream calls, which go to the third parties the grant table names (a {@code
- * platform:} route's call to a platform service comes with qits-2623, and its row with it).
+ * <p>Not seen here, because a library makes them: the OTLP export. No pact: the proxy's upstream
+ * calls — to the third parties the grant table names, and a {@code platform:} route's call to a
+ * PUBLIC platform service, which is the CALLER's request passed through (its contract is the
+ * caller's own), with the caller's bearer exchanged; that exchange at qits-idp is rowed.
  *
  * <p>THIS SERVICE IS PUBLIC: it can reach public platform services only. qits-projects,
  * qits-deployments, qits-ci and every other {@code exposure: private} service are unreachable from
@@ -61,8 +62,14 @@ class OutboundCallGuardTest {
           "qits-idp getOpenIdConfiguration and getJwks (IdpPactTest DISCOVERY, JWKS)",
           "eu.wohlben.qits.egress.identity.IdpIntrospection",
           "qits-idp introspectToken (IdpPactTest INTROSPECT, INTROSPECT_DELETED)",
+          "eu.wohlben.qits.egress.identity.IdpTokenExchange",
+          "qits-idp issueToken, token exchange (IdpPactTest EXCHANGE_PERSON, EXCHANGE_COMMISSIONED,"
+              + " EXCHANGE_NOT_ACTOR, EXCHANGE_CHAINED)",
+          "eu.wohlben.qits.egress.identity.PlatformBearers",
+          "builds the client IdpTokenExchange dials with",
           "eu.wohlben.qits.egress.proxy.EgressProxy",
-          "the proxied call to a granted route's third-party target: no qits service",
+          "the proxied call to a granted route's target: a third party, or a public platform"
+              + " service passing the caller's own request through",
           "eu.wohlben.qits.egress.proxy.ProxyClients",
           "builds the proxy's upstream client",
           "eu.wohlben.qits.egress.proxy.WebSocketSplice",
@@ -105,6 +112,12 @@ class OutboundCallGuardTest {
     for (String operation : List.of("getOpenIdConfiguration", "getJwks", "introspectToken")) {
       assertTrue(rowed.contains(operation), "the proxy listener's identity calls " + operation);
     }
+    Set<String> exchangeStates =
+        IdpPactTest.PACT.rows().stream()
+            .filter(row -> row.trigger().equals(IdpPactTest.PLATFORM_CALLER))
+            .map(GoldenInteraction::state)
+            .collect(Collectors.toSet());
+    assertEquals(IdpPactTest.EXCHANGE_STATES, exchangeStates, "a platform route's exchange is rowed");
   }
 
   @Test

@@ -26,7 +26,8 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
     the wire records `GrantTableWire`, their native registration `ApiWireReflection`);
   - `grants/` the in-memory index each replica enforces and its refresh (`GrantIndex`, `GrantRoute`);
   - `identity/` the proxy listener's caller identity (`CallerIdentity`, `IdpKeys`, `SignedJwt`,
-    `IdpIntrospection`, `Principal`), copied from qits-edge and adapted;
+    `IdpIntrospection`, `Principal`), copied from qits-edge and adapted, and a platform route's
+    token exchange (`IdpTokenExchange`, the cache `PlatformBearers`);
   - `proxy/` the 8081 listener (`EgressProxy`), what leaves for the upstream (`EgressOutbound`),
     the audit line (`AuditLine`), the secrets (`SecretStore`), the HTTPS_PROXY forms
     (`ProxyCredential`, `AbsoluteTarget`, `ConnectTunnel`), the scrubbing (`Scrubber`,
@@ -50,8 +51,12 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
   (qits-agents paid for this in qits-2518).
 - **Outbound calls** are guarded by `contracts/consumer/OutboundCallGuardTest`: only the classes in
   its `DIALLERS` reach an HTTP client, each named with the rows that cover its calls (the idp's
-  discovery, JWKS and `introspectToken`). The proxy's upstream calls go to third parties and carry
-  no pact; a `platform:` route's call (qits-2623) brings its row.
+  discovery, JWKS, `introspectToken` and the exchange's `issueToken`). The proxy's upstream calls
+  carry no pact: to a third party, or a platform route's call, which is the caller's own request
+  passed through to a public platform service.
+- **An exchanged bearer goes to a platform target only** (`PlatformOutbound` throws for any other
+  route). Never put it in a header a third-party route forwards, never cache it under the token
+  itself (`CallerIdentity.fingerprint`), never log it.
 - **The proxy listener is not Quarkus HTTP.** Nothing on 8081 passes quarkus-oidc, the security
   layer or a JAX-RS filter: every check is in `proxy/EgressProxy`, and every refusal it writes is
   JSON and audited. Every request form (`EgressProxy.Form`: gateway, absolute, CONNECT) goes
@@ -93,7 +98,7 @@ Every one of these compares by default and fails with a diff; `-Dgolden.update=t
 
 | File | Written by |
 |---|---|
-| `pacts/*_qits-idp-service.json` | `contracts/consumer/IdpPactTest` (the mint row run by `IdpTokenMintPactTest`, the introspection rows by `IdpIntrospectionPactTest`) |
+| `pacts/*_qits-idp-service.json` | `contracts/consumer/IdpPactTest` (the mint row run by `IdpTokenMintPactTest`, the introspection rows by `IdpIntrospectionPactTest`, the exchange rows by `IdpTokenExchangePactTest`). Written by `IdpPactTest.theCommittedPactIsWhatTheRowsWrite`, not the library's `compareOrWritePactFile`: the exchange rows' form body gets a provider-state generator `$.subject_token = ${subjectToken}` the library cannot express (idp's states mint a fresh subject token) |
 | `golden-masters/**` | `contracts/GoldenMasterRecordingTest`, states in `contracts/ProviderStates` |
 | `docs/openapi.yml` | `api/OpenApiSchemaExportTest` (always rewrites; the diff is the review) |
 
@@ -107,8 +112,13 @@ client is the first — then flip `ClasspathPactLoader.REQUIRED`).
 ## The suites' idp
 
 Every `@QuarkusTest` points `qits.egress.idp.url` at `testdb/SuiteIdp` (registered by
-`testdb/MockIdpConfigSource`): discovery and a settable token introspection, in front of
-`MockIdp`'s issuer and JWKS, so tokens minted with `MockIdp.token()` validate at the gateway.
+`testdb/MockIdpConfigSource`): discovery, a settable token introspection and a token exchange that
+mints like qits-idp (`sub`/groups copied, `act.sub` the asking client; `refuseExchanges`,
+`exchangeLife` set it), in front of `MockIdp`'s issuer and JWKS, so tokens minted with
+`MockIdp.token()` validate at the gateway. The same config source points
+`qits.egress.platform.origin` at SuiteIdp's `/platform/{label}`, the suites' platform service, which
+records what it received. SuiteIdp parses JSON with Jackson, never Vert.x' `JsonObject`: in its
+class loader Vert.x' JSON factory is Quarkus' and fails to load.
 MockIdp's own stubs cannot be used from a `@QuarkusTest` (a different class loader started it);
 `SuiteIdp` crosses loaders through system properties. The gateway suite's upstream is plain http,
 allowed only by `qits.egress.test.allow-plain-http=true` in the test properties.

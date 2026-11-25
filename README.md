@@ -91,14 +91,46 @@ The gateway form, one call in this order (`proxy/EgressProxy`):
 4. **Grant**: the route (caller application, `<route>`) must exist and its `methods` hold the
    method, else **403** `{"error":"no grant","principal","route","method"}`. A path with a `.`/`..`
    segment is 400.
-5. `platform:` routes → **501** (qits-2623). A secret this process does not hold → **502**
-   `{"error":"secret not configured"}`.
+5. A secret this process does not hold → **502** `{"error":"secret not configured"}`. A
+   `platform:` route takes the platform path instead (below).
 6. **Out** through `vertx-http-proxy` (bodies stream both ways) to `<target><rest>?<query>` over
    TLS, `Host` the target's. Removed: `Authorization`, `Proxy-Authorization`, `Cookie`, every
    `X-Qits-*` header and the hop-by-hop set. Injected: `inject: bearer` → `Authorization: Bearer
    <secret>`; `inject: header:<Name>` → `<Name>: <secret>`. `Accept-Encoding: identity`, so the
    answer can be scrubbed.
 7. **Back**, scrubbed (below), streamed as it arrives.
+
+### Platform routes (`platform:<label>`)
+
+A route `target: platform:<label>` reaches the platform service `<label>` at its public edge host,
+`https://<label>.qits.${QITS_DOMAIN}` (`qits.egress.platform.origin`, `{label}` replaced;
+`QITS_DOMAIN` is injected into every container). qits-egress is public, so only **public** platform
+services can be reached this way (the epic's 2026-11-25 correction); a private one needs a private
+egress variant.
+
+- **The caller's bearer is exchanged** at qits-idp (RFC 8693, qits-2613;
+  `identity/IdpTokenExchange`, `identity/PlatformBearers`): `POST <idp>/token`, the base the
+  service's own oidc client mints at, with this service's Basic client pair
+  (`QITS_RESOURCE_IDP_CLIENT_ID/_SECRET`, `${QITS_ENVIRONMENT}-qits-egress`, the actor idp allows by
+  default), `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, `subject_token=<the
+  caller's raw bearer, JWT or qits_tok_>`,
+  `subject_token_type=urn:ietf:params:oauth:token-type:access_token`. idp answers a JWT whose
+  `sub`, groups, project, agent… are the caller's and whose `act.sub` is
+  `${QITS_ENVIRONMENT}-qits-egress`: the target sees who called, and that it came through the
+  gateway; nothing is widened.
+- **Cached** per SHA-256 of the caller's bearer until 30 s before the exchanged token expires (one
+  with less life is not cached), bounded at 4096 entries; a refusal is not cached.
+- **Sent** as `Authorization: Bearer <exchanged>` to the platform target and nowhere else:
+  `proxy/PlatformOutbound` refuses a route that is not a platform route, and a third-party route's
+  `EgressOutbound` removes every `Authorization` and writes its secret. The caller's own
+  credentials, cookie and `X-Qits-*` are removed as for any route. No secret is injected and
+  nothing is scrubbed.
+- **Refused** by idp (`unauthorized_client`, `invalid_grant`, anything not 200): **502**
+  `{"error":"token exchange refused"}`, audit DENY reason `exchange-refused`. idp unreachable:
+  **503**, reason `idp-unreachable`.
+
+Platform routes take every request form: the gateway form, absolute-form at the platform origin,
+and WebSockets (spliced with the exchanged bearer on the handshake); never `CONNECT`.
 
 ### HTTPS_PROXY clients (absolute-form and CONNECT)
 
@@ -176,7 +208,7 @@ the connection closes:
 
 `status` is the upstream's for an allowed call and the gateway's own otherwise. Reasons:
 `no-credentials`, `bad-credentials`, `idp-unreachable`, `no-table`, `no-route`, `bad-path`,
-`no-grant`, `method-not-granted`, `platform-route`, `bad-route`, `no-secret`, `bad-target` (an
+`no-grant`, `method-not-granted`, `bad-route`, `no-secret`, `exchange-refused`, `bad-target` (an
 absolute-form or `CONNECT` target that does not parse), and on an ALLOW
 `upstream-unreachable` when the proxy answered 502 itself, `upstream-encoded` when a secret route's
 answer was encoded and refused, `websocket` for a spliced socket (written at its close, status 101). Never a header value, a query value, a
@@ -185,8 +217,9 @@ body or a secret; caller-influenced values are reduced to a safe alphabet.
 ## What it may call
 
 qits-egress is public, so it reaches **public platform services only**: qits-idp (at
-`https://idp.qits.<domain>/idp`), qits-observability's OTLP intake, and public targets of platform
-routes. qits-projects, qits-deployments, qits-ci and every other private service are unreachable
+`https://idp.qits.<domain>/idp`: JWKS, discovery, introspection and the token exchange, each with a
+pact row in `pacts/qits-egress-service_qits-idp-service.json`), qits-observability's OTLP intake,
+and public targets of platform routes. qits-projects, qits-deployments, qits-ci and every other private service are unreachable
 from it — never add a call to one. A private caller or target needs a private egress variant, which
 is follow-up work.
 

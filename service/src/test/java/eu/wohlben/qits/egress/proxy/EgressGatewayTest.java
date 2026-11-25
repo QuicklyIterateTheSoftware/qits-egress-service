@@ -46,8 +46,7 @@ import org.junit.jupiter.api.Test;
  * <p>What it proves: the route's secret arrives upstream in its header and the caller's {@code
  * Authorization}, {@code Cookie} and {@code X-Qits-*} do not; 403 for an ungranted route, for a
  * method outside {@code methods} and for a caller that is not an application; 401 without a bearer
- * or with a bad one; 503 with no table; 502 for a secret this process does not hold; 501 for a
- * platform route; an opaque token introspected once and then cached; and exactly one audit line per
+ * or with a bad one; 503 with no table; 502 for a secret this process does not hold; an opaque token introspected once and then cached; and exactly one audit line per
  * call, carrying no query, no header value and no secret.
  */
 @QuarkusTest
@@ -378,14 +377,6 @@ class EgressGatewayTest {
     assertEquals("{\"error\":\"secret not configured\"}", answer.body());
     assertTrue(RECEIVED.isEmpty());
     assertTrue(theAuditLine().endsWith(" reason=no-secret"));
-  }
-
-  @Test
-  void aPlatformRouteIsNotServedYet() throws Exception {
-    HttpResponse<String> answer = call("GET", "/self-check/projects/api/projects", serviceToken(EDGE));
-    assertEquals(501, answer.statusCode());
-    assertEquals("platform routes not yet supported", new JsonObject(answer.body()).getString("error"));
-    assertTrue(theAuditLine().endsWith(" reason=platform-route"));
   }
 
   @Test

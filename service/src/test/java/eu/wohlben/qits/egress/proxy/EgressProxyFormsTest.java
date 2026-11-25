@@ -456,7 +456,8 @@ class EgressProxyFormsTest {
 
   @Test
   void aConnectWithoutAGrantIsForbidden() throws Exception {
-    // The route reaches this host and port, but CONNECT is not among its methods.
+    // Two routes reach this host and port, neither with CONNECT among its methods; the refusal
+    // names the first by name.
     Answer answer =
         raw(
             "CONNECT 127.0.0.1:" + upstream.actualPort() + " HTTP/1.1\r\nHost: 127.0.0.1\r\n"
@@ -465,9 +466,9 @@ class EgressProxyFormsTest {
     JsonObject body = new JsonObject(answer.body());
     assertEquals("no grant", body.getString("error"));
     assertEquals("CONNECT", body.getString("method"));
-    assertEquals("suite", body.getString("route"));
+    assertEquals("deeper", body.getString("route"));
     String line = auditLine();
-    assertTrue(line.contains(" route=suite method=CONNECT target=127.0.0.1 path=- status=403"), line);
+    assertTrue(line.contains(" route=deeper method=CONNECT target=127.0.0.1 path=- status=403"), line);
     assertTrue(line.endsWith(" reason=method-not-granted"), line);
 
     // No route reaches this one at all.

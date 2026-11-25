@@ -3,6 +3,7 @@ package eu.wohlben.qits.egress.proxy;
 import eu.wohlben.qits.egress.grants.GrantIndex;
 import eu.wohlben.qits.egress.grants.GrantRoute;
 import eu.wohlben.qits.egress.identity.CallerIdentity;
+import eu.wohlben.qits.egress.identity.PlatformBearers;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
@@ -39,7 +40,9 @@ import org.jboss.logging.Logger;
  * (8081), started on {@link StartupEvent} from the Quarkus-managed {@link Vertx}, reached only on the
  * wire alias {@code ${QITS_ENVIRONMENT}-qits-egress:8081}. It serves the GATEWAY form, {@code
  * /<route>/<rest>?<query>}, streams and WebSockets, scrubs secret routes' answers and drains on
- * shutdown (qits-2621); absolute-form and {@code CONNECT} (qits-2622) join it later.
+ * shutdown (qits-2621), takes absolute-form requests and {@code CONNECT} from {@code HTTPS_PROXY}
+ * clients ({@link Form}, qits-2622), and serves platform routes with the caller's bearer exchanged
+ * at qits-idp (qits-2623).
  *
  * <p>One call, in order:
  *
@@ -51,9 +54,11 @@ import org.jboss.logging.Logger;
  *   <li><b>The grant</b> — the route {@code (caller application, <route>)} must exist and its
  *       {@code methods} hold the request's method: otherwise 403 {@code {"error":"no grant",
  *       "principal","route","method"}}. Only an {@code application:} principal holds routes.
- *   <li><b>The route can be served</b> — a {@code platform:} target is 501 until qits-2623; a route
- *       whose target or injection the index could not compile is 502; a secret this process does
- *       not hold is 502 {@code {"error":"secret not configured"}}, reason {@code no-secret}.
+ *   <li><b>The route can be served</b> — a route whose target or injection the index could not
+ *       compile is 502; a secret this process does not hold is 502 {@code {"error":"secret not
+ *       configured"}}, reason {@code no-secret}; a {@code platform:} route needs the caller's
+ *       bearer exchanged at qits-idp ({@link PlatformBearers}), 502 {@code {"error":"token
+ *       exchange refused"}} when idp refuses, reason {@code exchange-refused}.
  *   <li><b>Out</b> — through {@code vertx-http-proxy} ({@link HttpProxy#reverseProxy}), so bodies
  *       stream both ways unbuffered, to {@code <target><rest>?<query>} over TLS, with {@link
  *       EgressOutbound}, {@link ResponseScrub}, {@link EdgeHopByHop}, {@link EdgeRequestFraming}
@@ -94,6 +99,8 @@ public class EgressProxy {
   @Inject GrantIndex grants;
 
   @Inject SecretStore secrets;
+
+  @Inject PlatformBearers platformBearers;
 
   @ConfigProperty(name = "qits.egress.proxy.port", defaultValue = "8081")
   int port;
@@ -298,20 +305,37 @@ public class EgressProxy {
                 return;
               }
               audit.principal(verdict.principal());
+              Call call = new Call(request, audit, exchange, verdict, rawBearer(credential));
               switch (form) {
-                case GATEWAY -> route(request, audit, exchange, verdict, gateway);
-                case ABSOLUTE -> absolute(request, audit, exchange, verdict, absolute);
-                case CONNECT -> connect(request, audit, exchange, verdict);
+                case GATEWAY -> route(call, gateway);
+                case ABSOLUTE -> absolute(call, absolute);
+                case CONNECT -> connect(call);
               }
             });
   }
 
-  private void route(
+  /**
+   * One identified call on its way: the request, its audit line and exchange, who the caller is and
+   * the bearer it presented (a platform route exchanges it; nothing else reads it).
+   */
+  record Call(
       HttpServerRequest request,
       AuditLine audit,
       InFlight.Exchange exchange,
       CallerIdentity.Verdict verdict,
-      Gateway gateway) {
+      String bearer) {}
+
+  /** The token of a {@code Bearer …} value. */
+  static String rawBearer(String authorization) {
+    return authorization == null || authorization.length() < 7
+        ? null
+        : authorization.substring(7).trim();
+  }
+
+  private void route(Call call, Gateway gateway) {
+    HttpServerRequest request = call.request();
+    AuditLine audit = call.audit();
+    CallerIdentity.Verdict verdict = call.verdict();
     GrantIndex.Table table = grants.current();
     if (table == null) {
       refuse(request, audit, 503, "no-table", error("no grant table yet"));
@@ -341,25 +365,17 @@ public class EgressProxy {
           noGrant(verdict, gateway.route(), method));
       return;
     }
-    serve(
-        request,
-        audit,
-        exchange,
-        route,
-        upstreamPath(route.basePath(), gateway.rest()),
-        request.query());
+    serve(call, route, upstreamPath(route.basePath(), gateway.rest()), request.query());
   }
 
   /**
    * An absolute-form request: the caller's granted route whose target origin is the request's and
    * whose base path prefixes its path — the longest such base path — or 403.
    */
-  private void absolute(
-      HttpServerRequest request,
-      AuditLine audit,
-      InFlight.Exchange exchange,
-      CallerIdentity.Verdict verdict,
-      AbsoluteTarget target) {
+  private void absolute(Call call, AbsoluteTarget target) {
+    HttpServerRequest request = call.request();
+    AuditLine audit = call.audit();
+    CallerIdentity.Verdict verdict = call.verdict();
     if (target == null) {
       refuse(request, audit, 400, "bad-target", error("the request target is not an http(s) URL"));
       return;
@@ -391,7 +407,7 @@ public class EgressProxy {
       return;
     }
     audit.route(route.name());
-    serve(request, audit, exchange, route, target.path(), target.query());
+    serve(call, route, target.path(), target.query());
   }
 
   /**
@@ -400,11 +416,10 @@ public class EgressProxy {
    * and nothing is scrubbed; the audit line is {@code method=CONNECT path=-}, written when the
    * tunnel closes.
    */
-  private void connect(
-      HttpServerRequest request,
-      AuditLine audit,
-      InFlight.Exchange exchange,
-      CallerIdentity.Verdict verdict) {
+  private void connect(Call call) {
+    HttpServerRequest request = call.request();
+    AuditLine audit = call.audit();
+    CallerIdentity.Verdict verdict = call.verdict();
     ConnectTunnel.Authority authority = ConnectTunnel.Authority.parse(request.uri());
     if (authority == null) {
       refuse(request, audit, 400, "bad-target", error("CONNECT takes host:port"));
@@ -418,11 +433,18 @@ public class EgressProxy {
     }
     GrantRoute reached = null;
     GrantRoute granted = null;
-    for (GrantRoute route : table.routes(verdict.principal().application())) {
+    // By name, so which route a refusal names does not depend on a map's order.
+    List<GrantRoute> candidates =
+        table.routes(verdict.principal().application()).stream()
+            .sorted(java.util.Comparator.comparing(GrantRoute::name))
+            .toList();
+    for (GrantRoute route : candidates) {
       if (!authority.reaches(route)) {
         continue;
       }
-      reached = route;
+      if (reached == null) {
+        reached = route;
+      }
       if (route.methods().contains("CONNECT")) {
         granted = route;
         break;
@@ -443,7 +465,7 @@ public class EgressProxy {
     }
     audit.route(granted.name());
     audit.allow();
-    tunnels.open(request, authority, exchange, audit);
+    tunnels.open(request, authority, call.exchange(), audit);
   }
 
   /** The 403 body: who asked for what. */
@@ -461,31 +483,86 @@ public class EgressProxy {
    * @param path the upstream path, without the query
    * @param query the raw query, or null
    */
-  private void serve(
-      HttpServerRequest request,
-      AuditLine audit,
-      InFlight.Exchange exchange,
-      GrantRoute route,
-      String path,
-      String query) {
-    if (route.isPlatform()) {
-      audit.target("platform:" + route.platform(), path);
-      refuse(request, audit, 501, "platform-route", error("platform routes not yet supported"));
-      return;
-    }
+  private void serve(Call call, GrantRoute route, String path, String query) {
+    HttpServerRequest request = call.request();
+    AuditLine audit = call.audit();
     if (route.problem() != null) {
       refuse(request, audit, 502, "bad-route", error("the route cannot be served: " + route.problem()));
       return;
     }
     audit.target(route.host(), path);
+    String uri = query == null || query.isEmpty() ? path : path + "?" + query;
+    if (route.isPlatform()) {
+      platform(call, route, uri);
+      return;
+    }
     String secret = secrets.value(route.secret()).orElse(null);
     if (secret == null) {
       refuse(request, audit, 502, "no-secret", error("secret not configured"));
       return;
     }
-    String uri = query == null || query.isEmpty() ? path : path + "?" + query;
     audit.allow();
-    forward(request, audit, exchange, route, uri, secret);
+    forward(request, audit, call.exchange(), route, uri, secret);
+  }
+
+  /**
+   * A platform route: the caller's bearer exchanged at qits-idp ({@link PlatformBearers}), then out
+   * with that bearer and nothing to inject or scrub. idp's refusal is 502 {@code {"error":"token
+   * exchange refused"}}, reason {@code exchange-refused}; an unreachable idp 503.
+   */
+  private void platform(Call call, GrantRoute route, String uri) {
+    HttpServerRequest request = call.request();
+    AuditLine audit = call.audit();
+    if (call.bearer() == null || call.bearer().isEmpty()) {
+      refuse(request, audit, 502, "exchange-refused", error("token exchange refused"));
+      return;
+    }
+    platformBearers
+        .bearerFor(call.bearer())
+        .onComplete(
+            result -> {
+              PlatformBearers.Verdict verdict = result.succeeded() ? result.result() : null;
+              if (verdict == null || !verdict.exchanged()) {
+                int status = verdict == null ? 503 : verdict.status();
+                refuse(
+                    request,
+                    audit,
+                    status,
+                    verdict == null ? "idp-unreachable" : verdict.reason(),
+                    error(
+                        status == 502
+                            ? "token exchange refused"
+                            : "the identity provider cannot be reached"));
+                return;
+              }
+              audit.allow();
+              forwardPlatform(request, audit, call.exchange(), route, uri, verdict.bearer());
+            });
+  }
+
+  /** A platform call on: like {@link #forward}, with the exchanged bearer and no scrubbing. */
+  private void forwardPlatform(
+      HttpServerRequest request,
+      AuditLine audit,
+      InFlight.Exchange exchange,
+      GrantRoute route,
+      String uri,
+      String bearer) {
+    if (isWebSocketUpgrade(request)) {
+      audit.reason("websocket");
+      MultiMap outbound = handshakeHeaders(request.headers());
+      PlatformOutbound.authorize(outbound, route, bearer);
+      webSockets.handle(request, originOptions(route), uri, outbound, null, exchange, audit);
+      return;
+    }
+    Pool pool = isStream(request) ? stream : ordinary;
+    HttpProxy.reverseProxy(new ProxyOptions().setSupportWebSocket(false), pool.client())
+        .origin(origin(route, pool, pool.client()))
+        .addInterceptor(new PlatformOutbound(route, uri, bearer, audit))
+        .addInterceptor(new EdgeHopByHop())
+        .addInterceptor(new EdgeRequestFraming())
+        .addInterceptor(new UpstreamRetry(route.authority(), origin(route, pool, pool.fresh())))
+        .handle(request);
   }
 
   /**

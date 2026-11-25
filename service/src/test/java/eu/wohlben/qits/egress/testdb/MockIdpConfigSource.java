@@ -19,6 +19,9 @@ public class MockIdpConfigSource implements ConfigSource {
 
   static final String KEY = "qits.egress.idp.url";
 
+  /** Where a platform route goes in the suites: SuiteIdp's {@code /platform/{label}}. */
+  static final String PLATFORM_KEY = "qits.egress.platform.origin";
+
   @Override
   public int getOrdinal() {
     return 500;
@@ -26,12 +29,15 @@ public class MockIdpConfigSource implements ConfigSource {
 
   @Override
   public Set<String> getPropertyNames() {
-    return Set.of(KEY);
+    return Set.of(KEY, PLATFORM_KEY);
   }
 
   @Override
   public String getValue(String propertyName) {
-    return KEY.equals(propertyName) ? SuiteIdp.ensureStarted() : null;
+    if (KEY.equals(propertyName)) {
+      return SuiteIdp.ensureStarted();
+    }
+    return PLATFORM_KEY.equals(propertyName) ? SuiteIdp.platformOrigin() : null;
   }
 
   @Override
