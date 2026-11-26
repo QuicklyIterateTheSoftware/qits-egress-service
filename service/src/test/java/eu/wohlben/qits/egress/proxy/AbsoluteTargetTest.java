@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.egress.api.GrantTableWire;
+import eu.wohlben.qits.egress.identity.Principal;
 import eu.wohlben.qits.egress.grants.GrantIndex;
 import eu.wohlben.qits.egress.grants.GrantRoute;
 import java.nio.charset.StandardCharsets;
@@ -29,7 +30,7 @@ class AbsoluteTargetTest {
                   List.of()),
               false,
               "https://{label}.qits.wohlben.eu")
-          .routes("qits-edge");
+          .routes(new Principal(Principal.APPLICATION, "qits-edge"));
 
   static GrantTableWire.Route route(String name, String target, String... methods) {
     return new GrantTableWire.Route(

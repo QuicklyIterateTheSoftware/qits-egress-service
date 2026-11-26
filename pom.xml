@@ -71,6 +71,11 @@
              state, what tls/LeafDoor asks for a per-host leaf (qits-2643). A first adoption, pinned
              by hand; maintenance's bumps move it from here on. -->
         <qits.certificates-golden-masters.version>2026.1125.100217</qits.certificates-golden-masters.version>
+        <!-- The shape qits-deployments pushes (test scope): its `GET /deployments/api/egress-grants`
+             golden masters, the body of `PUT /egress/api/grant-table`, bound and indexed by
+             contracts/consumer/DeploymentsGrantTableTest (qits-2660: the project-route state). A
+             first adoption, pinned by hand; maintenance's bumps move it from here on. -->
+        <qits.deployments-golden-masters.version>2026.1126.12943</qits.deployments-golden-masters.version>
         <qits.maven.repository.url>https://registry.qits.wohlben.eu/artifacts/maven/maven</qits.maven.repository.url>
         <!-- Real PostgreSQL binaries as a maven dependency, spawned by the suite: a clone tests
              green with NO DOCKER, so no Testcontainers and no dev services. -->
@@ -128,6 +133,11 @@
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-certificates-golden-masters</artifactId>
                 <version>${qits.certificates-golden-masters.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-deployments-golden-masters</artifactId>
+                <version>${qits.deployments-golden-masters.version}</version>
             </dependency>
             <dependency>
                 <groupId>${project.groupId}</groupId>

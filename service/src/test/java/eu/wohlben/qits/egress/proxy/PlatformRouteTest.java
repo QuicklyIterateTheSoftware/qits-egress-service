@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.egress.api.GrantTableWire;
+import eu.wohlben.qits.egress.identity.Principal;
 import eu.wohlben.qits.egress.grants.GrantIndex;
 import eu.wohlben.qits.egress.grants.GrantRoute;
 import eu.wohlben.qits.egress.store.GrantTableStore;
@@ -290,7 +291,7 @@ class PlatformRouteTest {
 
     // And the interceptor that carries the bearer refuses any route that is not a platform route.
     GrantRoute third =
-        GrantIndex.index(table(), true, SuiteIdp.platformOrigin()).route("qits-edge", "third");
+        GrantIndex.index(table(), true, SuiteIdp.platformOrigin()).route(new Principal(Principal.APPLICATION, "qits-edge"), "third");
     assertThrows(
         IllegalArgumentException.class,
         () -> new PlatformOutbound(third, "/base/x", "exchanged", new AuditLine("GET", "/x")));

@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.egress.api.GrantTableWire;
 import eu.wohlben.qits.egress.grants.GrantIndex;
 import eu.wohlben.qits.egress.grants.GrantRoute;
 import java.security.cert.X509Certificate;
@@ -117,13 +118,13 @@ class LeafCertificatesTest {
         new GrantIndex.Table(
             7,
             Map.of(
-                "qits-edge",
+                "application:qits-edge",
                 Map.of(
                     "hetzner", route("qits-edge", "hetzner", "api.hetzner.cloud", true, null, null),
                     "plain", route("qits-edge", "plain", "plain.example.org", false, null, null),
                     "idp", route("qits-edge", "idp", null, true, "idp", null),
                     "broken", route("qits-edge", "broken", "broken.example.org", true, null, "the injection is neither")),
-                "qits-ci",
+                "application:qits-ci",
                 Map.of(
                     "hetzner", route("qits-ci", "hetzner", "API.Hetzner.Cloud", true, null, null),
                     "github", route("qits-ci", "github", "api.github.com", true, null, null))));
@@ -132,6 +133,26 @@ class LeafCertificatesTest {
 
     leaves.want(LeafCertificates.httpsHosts(table));
     assertEquals(List.of("api.github.com", "api.hetzner.cloud"), issuer.hosts());
+  }
+
+  @Test
+  void aProjectRouteHostIsPreIssuedFromTheIndexedTable() {
+    GrantIndex.Table table =
+        GrantIndex.index(
+            new GrantTableWire.GrantTable(
+                3,
+                List.of(
+                    new GrantTableWire.Route(
+                        "project:p", null, null, "0f1e2d3c4b5a", "portal", "https://Portal.Example.com",
+                        "PROJECT_P_SESSION", "cookie:sid", List.of("GET")),
+                    new GrantTableWire.Route(
+                        "qits-edge", "dev", "1", "hetzner", "https://api.hetzner.cloud", "HETZNER_DNS",
+                        "bearer", List.of("GET"))),
+                List.of()),
+            false,
+            "https://{label}.qits.wohlben.eu");
+
+    assertEquals(Set.of("api.hetzner.cloud", "portal.example.com"), LeafCertificates.httpsHosts(table));
   }
 
   @Test

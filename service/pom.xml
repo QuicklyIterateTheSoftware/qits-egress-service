@@ -151,6 +151,13 @@
             <scope>test</scope>
         </dependency>
         <dependency>
+            <!-- What qits-deployments pushes: its egress-grants golden masters
+                 (contracts/consumer/DeploymentsGrantTableTest, qits-2660). -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-deployments-golden-masters</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <!-- The store every @QuarkusTest here boots against: real postgres binaries, spawned
                  as a child process. -->
             <groupId>io.zonky.test</groupId>
