@@ -23,7 +23,7 @@
          ranges: qits-maintenance bumps each one. -->
     <groupId>eu.wohlben.qits</groupId>
     <artifactId>qits-egress</artifactId>
-    <version>2026.1126.34035</version>
+    <version>2026.1126.60653</version>
     <packaging>pom</packaging>
     <name>qits-egress</name>
 
