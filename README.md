@@ -26,7 +26,7 @@ The application is `qits-egress`, image `qits/qits-egress`, two replicas.
 
 | Port | What | Reached by |
 |---|---|---|
-| 8080 | Quarkus HTTP, the **management** listener: `/egress/api` (the grant-table door, and the forward websocket `GET /egress/api/forward` that splices to 8081, qits-2654) and `/egress/q` (health) | `https://egress.qits.<domain>/egress` through the **public** edge; the deployer's healthcheck at `/egress/q/health/ready` |
+| 8080 | Quarkus HTTP, the **management** listener: `/egress/api` (the grant-table door, the Claude credential door (qits-2664), and the forward websocket `GET /egress/api/forward` that splices to 8081, qits-2654) and `/egress/q` (health) | `https://egress.qits.<domain>/egress` through the **public** edge; the deployer's healthcheck at `/egress/q/health/ready` |
 | 8081 | Vert.x server (HTTP/1.1, no h2c), the **proxy**: gateway form `/<route>/<rest>` (qits-2620), streams, WebSockets, scrubbing and the drain (qits-2621), absolute-form `HTTP(S)_PROXY` requests and `CONNECT` (qits-2622) | `http://${QITS_ENVIRONMENT}-qits-egress:8081`, the wire alias on qits-net only; no edge routes it |
 | 8443 | Vert.x server, TLS, bound to **127.0.0.1 only**: the **interception** listener, where a granted `CONNECT`'s TLS ends (qits-2644) | only by the proxy's own tunnels; nothing outside the process' network namespace |
 
@@ -111,6 +111,70 @@ for an `agent:` principal, `project:<its project>` — agents are minted per lau
 project, and the audit line still names the agent. Of two routes of one name, the agent's own wins.
 Every form (gateway, absolute, `CONNECT` and the requests inside an intercepted tunnel) looks routes
 up this way; the passthrough is only for what no held route matches.
+
+## The Claude credential (8080 `/egress/api/claude-credential`, 8081 the Claude hosts; qits-2664)
+
+The node's Claude subscription login is held **here**, and every agent container keeps only a
+placeholder (`.credentials.json` with `accessToken` and `refreshToken` both
+`qits-egress-placeholder`, `expiresAt` 2100-01-01, so Claude Code never refreshes on its own). The
+runner hands the login over and writes the placeholder (dossier `claude-credential-in-qits-egress`).
+
+**The store** (`V2__claude_credential.sql`, `store/ClaudeCredentialStore`, plain JDBC):
+`egress.egress_claude_credential`, one row `id = 1` — the two tokens (plaintext; encryption at rest
+is out of scope), `expires_at`, `refresh_expires_at`, `scopes` (space separated),
+`subscription_type`, `rate_limit_tier`, `source` (`hand-over <runner>` / `sign-in <runner>`),
+`updated_at`, `last_refresh_at`, `last_refresh_error`. No door, log line or error body ever carries
+a token; the records' `toString` names none.
+
+| Door | Who | Answers |
+|---|---|---|
+| `PUT /egress/api/claude-credential?mode=adopt\|replace`, body the `claudeAiOauth` object (`accessToken`, `refreshToken`, `expiresAt` and `refreshTokenExpiresAt` in epoch ms, `scopes[]`, `subscriptionType`, `rateLimitTier`) | `qits:target-runner` only (the runner's idp client) | `adopt`: 204 stored when nothing is held, 409 `{"held":true}` otherwise; `replace`: 204 always (a fresh sign-in; clears the refresh state); 400 for a placeholder token, a missing token or `expiresAt`, or another mode |
+| `GET /egress/api/claude-credential` | `qits:agent`, `qits:system`, `qits:admin`, `qits:target-runner` | 200 `{held, expiresAt, refreshExpiresAt, scopes, subscriptionType, rateLimitTier, source, updatedAt, lastRefreshAt, lastRefreshError}` — never a token; `held: false` and the rest null when none is held |
+
+**The refresh** (`claude/ClaudeRefresher`, `claude/ClaudeTokenEndpoint`): every
+`qits.egress.claude.refresh-check` (5 m), when less than `qits.egress.claude.refresh-margin` (60 m)
+is left, `POST qits.egress.claude.token-url` (`https://platform.claude.com/v1/oauth/token`) with JSON
+`{"grant_type":"refresh_token","refresh_token":<held>,"client_id":<qits.egress.claude.client-id>}`,
+storing `access_token`, the rotated `refresh_token`, `expires_at = now + expires_in` and `scope`.
+The check and the call run in **one transaction holding `SELECT … FOR UPDATE`** on the row: of two
+replicas, one calls and the other then finds the row no longer due (the refresh token rotates, so a
+second call would spend a retired one). A failure is one WARN naming a fixed reason (never the body)
+and `last_refresh_error`; the next check retries. Each replica holds the login in memory
+(`claude/ClaudeCredentials`) and re-reads the row every `qits.egress.claude.reread` (30 s), at once
+after a store at the door and after its own refresh.
+
+**The Claude hosts** (`proxy/ClaudeHosts`, `qits.egress.claude.hosts` =
+`api.anthropic.com,platform.claude.com,claude.ai`), for a principal **with a project** (never an
+application). In order per request: a granted route that matches takes the ordinary path; else the
+Claude behaviour; else the passthrough.
+
+- `CONNECT <host>:443` is **intercepted** (a leaf of ours; the Claude hosts are always among the
+  leaves pre-issued) even without a route and without a grant table; audit `route=claude ...
+  tls=intercepted leafSerial=<hex>`.
+- Each inner request (`proxy/ClaudeOutbound`): `Authorization: Bearer qits-egress-placeholder` →
+  `Bearer <held access token>`; **any other `Authorization` goes on unchanged** (a container not cut
+  over yet), so does the caller's `Cookie`; `Proxy-Authorization`, every `X-Qits-*` and the
+  hop-by-hop set are removed.
+- `POST /v1/oauth/token` on `platform.claude.com` whose JSON or form body carries
+  `refresh_token=qits-egress-placeholder` (a body of at most 64 KiB with a `Content-Length` is read
+  to tell) is **answered here**, never forwarded: `200 {"token_type":"Bearer","access_token":
+  "qits-egress-placeholder","refresh_token":"qits-egress-placeholder","expires_in":31536000,
+  "scope":"<held scopes>"}`, audit reason `claude-refresh`. A real refresh goes on with its body.
+- Every answer is **scrubbed of both held tokens** (`Scrubber`, streamed — an SSE answer still
+  arrives event by event; `Accept-Encoding: identity`, an encoded answer is 502). `Set-Cookie` is
+  dropped when the held login was injected, and passed on when the caller's own credential was.
+- A WebSocket upgrade takes the same swap on its handshake.
+- Nothing held: a placeholder request (and the placeholder refresh) is **503** `{"error":"no claude
+  credential held"}`, audit reason `no-claude-credential`. A request with its own bearer still goes.
+
+| Key | Default |
+|---|---|
+| `qits.egress.claude.hosts` | `api.anthropic.com,platform.claude.com,claude.ai` |
+| `qits.egress.claude.token-url` | `https://platform.claude.com/v1/oauth/token` |
+| `qits.egress.claude.client-id` | `9d1c250a-e61b-44d9-88ed-5944d1962f5e` |
+| `qits.egress.claude.refresh-check` / `refresh-margin` | `5m` / `60m` |
+| `qits.egress.claude.reread` | `30s` |
+| `qits.egress.claude.timeout` | `30s` (the refresh call, connection included) |
 
 ## The gateway (8081)
 
@@ -381,10 +445,11 @@ absolute-form or `CONNECT` target that does not parse), `no-leaf` (a `CONNECT` w
 leaf), `misdirected` (an inner request whose SNI or `Host` is not the tunnel's, 421), `no-tunnel` (a
 loopback connection no tunnel opened), `passthrough-port`, `passthrough-platform-host`,
 `passthrough-single-label`, `passthrough-private-address`, `passthrough-unresolved` (the
-passthrough's refusals), `not-an-upgrade`, `listener-unreachable`, `bad-upgrade` (the forward
+passthrough's refusals), `no-claude-credential` (a placeholder with no login held, 503), `bad-body`
+(a token request whose body cannot be read), `not-an-upgrade`, `listener-unreachable`, `bad-upgrade` (the forward
 door's), and on an ALLOW `forward` for the forward's own line,
 `upstream-unreachable` when the proxy answered 502 itself, `upstream-encoded` when a secret route's
-answer was encoded and refused, `websocket` for a spliced socket (written at its close, status 101). Never a header value, a query value, a
+answer was encoded and refused, `claude-refresh` for a placeholder refresh answered here, `websocket` for a spliced socket (written at its close, status 101). Never a header value, a query value, a
 body or a secret; caller-influenced values are reduced to a safe alphabet.
 
 ## Per-host leaves (`tls/`, qits-2643)
@@ -438,7 +503,9 @@ pact row in `pacts/qits-egress-service_qits-idp-service.json`), qits-certificate
 doors (at `https://certificates.qits.<domain>/certificates`, through the edge), qits-observability's
 OTLP intake,
 public targets of platform routes, and — for a principal with a project, through the passthrough —
-public addresses of outside hosts (never a private one, never a platform name). qits-projects, qits-deployments, qits-ci and every other private service are unreachable
+public addresses of outside hosts (never a private one, never a platform name), and the Claude hosts
+(`api.anthropic.com`, `platform.claude.com`, `claude.ai`: the agents' calls, and the held login's
+refresh at `platform.claude.com/v1/oauth/token`). qits-projects, qits-deployments, qits-ci and every other private service are unreachable
 from it — never add a call to one. A private caller or target needs a private egress variant, which
 is follow-up work.
 

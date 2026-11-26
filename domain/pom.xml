@@ -12,7 +12,8 @@
     <!-- The domain: the egress database, its own named datasource and its Flyway lineage
          (META-INF/microprofile-config.properties, db/egress/migration). It holds the table the
          grant table is stored in (V1) and its store, store/GrantTableStore: plain JDBC, no
-         persistence unit (qits-2620). Internal, not published: `service` builds it from source.
+         persistence unit (qits-2620); and the Claude credential (V2, store/ClaudeCredentialStore,
+         plain JDBC too; qits-2664). Internal, not published: `service` builds it from source.
 
          The directory is `domain/` while the artifactId is `qits-egress-domain`: generic
          coordinates would collide in the shared ~/.m2 every workspace container mounts. -->

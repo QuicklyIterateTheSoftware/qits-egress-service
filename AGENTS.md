@@ -18,12 +18,18 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
 
 - `domain/` — owns the `egress` datasource and the Flyway lineage at `db/egress/migration` (schema
   `egress`). `V1__grant_table.sql` creates `egress_grant_table`; `store/GrantTableStore` reads and
-  writes its one row by **plain JDBC** — no persistence unit, no entity. The first entity, if one
+  writes its one row by **plain JDBC** — no persistence unit, no entity. `V2__claude_credential.sql`
+  creates `egress_claude_credential` (one row, `id = 1`); `store/ClaudeCredentialStore` is plain JDBC
+  too, its refresh one transaction under `SELECT … FOR UPDATE` (qits-2664). The first entity, if one
   ever comes, is marked for `CausationRowRules` (`CausedRow` or `@Uncaused`) and brings
   `EntityExposureTest`, `docs/entities.json` and `entities:`/`database:` in release.yml.
 - `service/` — the deployable:
   - `api/` the grant-table door (`GrantTableResource`, the publisher check `GrantTablePublisher`,
-    the wire records `GrantTableWire`, their native registration `ApiWireReflection`);
+    the wire records `GrantTableWire`, their native registration `ApiWireReflection`) and the Claude
+    credential door (`ClaudeCredentialResource`, `ClaudeCredentialWire`; qits-2664);
+  - `claude/` the held Claude login (qits-2664): `ClaudeCredentials` (this replica's copy, its
+    re-read and refresh timers), `ClaudeRefresher` (the row-locked refresh, a plain class so a suite
+    builds two replicas), `ClaudeTokenEndpoint` (the call at `platform.claude.com/v1/oauth/token`);
   - `grants/` the in-memory index each replica enforces and its refresh (`GrantIndex`, `GrantRoute`);
   - `identity/` the proxy listener's caller identity (`CallerIdentity`, `IdpKeys`, `SignedJwt`,
     `IdpIntrospection`, `Principal`), copied from qits-edge and adapted, and a platform route's
@@ -40,7 +46,9 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
     websocket on 8080; `ForwardedCallers`, its callers by loopback port; qits-2654) and the
     passthrough (`Passthrough`, its rules and resolve-once check; `PassthroughNetwork`, the resolver
     and dial seam; `PassthroughOutbound`, what leaves for a plain-http target; the blind splice in
-    `ConnectTunnel.blind`). qits-edge's
+    `ConnectTunnel.blind`), and the Claude hosts (`ClaudeHosts`, the hosts and the placeholder
+    rules; `ClaudeOutbound`, what leaves for one; `ClaudeUpstream`, the dial seam; qits-2664).
+    qits-edge's
     `DrainCount` is copied for its `settle` only (qits-2660): the proxy listener is a plain Vert.x
     server that `InFlight` counts itself, but a forward is a `toWebSocket()` on 8080, which Quarkus'
     HTTP drain counts and never hears end. `ForwardDoor` settles every forward on its close and on a
@@ -101,6 +109,21 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
   (they are the caller's); never run `EgressOutbound`'s strip or an injection there, and never
   intercept a passthrough `CONNECT`. A new refusal is `403 {"error":"passthrough refused",
   "reason"}` with audit reason `passthrough-<reason>`.
+- **The Claude hosts come after every granted route and before the passthrough**
+  (`EgressProxy.connect`/`absolute`, `ClaudeHosts.serves`): a principal with a project, a host of
+  `qits.egress.claude.hosts`, port 443 only. Only `Authorization: Bearer qits-egress-placeholder` is
+  rewritten; any other `Authorization` and the caller's `Cookie` go on unchanged — never run
+  `EgressOutbound`'s strip there. Both held tokens are scrubbed out of every answer, `Set-Cookie`
+  dropped only when the held login was injected. The placeholder refresh is answered locally and
+  never forwarded. A held token never reaches a door body, a log line, an error body, an audit line
+  or a `toString` (`ClaudeCredentialDoorTest` sweeps every door body for both values).
+- **One replica refreshes the Claude login**: the due check and the upstream call stay inside
+  `ClaudeCredentialStore.refresh`'s transaction (`SELECT … FOR UPDATE`), never wrapped in
+  `DbRetry` — a retried refresh would send a rotated-away refresh token. A failure records a fixed
+  reason, never the answer's body.
+- **The suites' Claude upstream** (`proxy/SuiteClaudeUpstream`, a `ClaudeUpstream` bean): a Claude
+  host listed in `DIALS` is dialled at `localhost:<fake port>` (the fake's certificate for
+  `localhost`), the request still naming the Claude host in `Host`.
 - **The suites' names** (`proxy/SuitePassthroughNetwork`, a `PassthroughNetwork` bean): made-up
   `*.passthrough.test` names resolve to the literals a test lists, and a checked "public" address
   (`203.0.113.7`) is dialled on loopback, where the fake upstreams are. Never loosen the address
@@ -173,8 +196,11 @@ Every one of these compares by default and fails with a diff; `-Dgolden.update=t
 
 The release gate fails any operation of `docs/openapi.yml` that `golden-masters/index.json` does not
 cover, so a new door joins `GoldenMasterRecordingTest.INTERACTIONS` in the same commit. The
-provider states are `a grant table is held` and `no grant table is held`; both grant
-`Bearer contract-qits-deployments` as the deployer's own client and hand it as `authorization`.
+provider states are `a grant table is held` and `no grant table is held`, which grant
+`Bearer contract-qits-deployments` as the deployer's own client and hand it as `authorization`; and
+`a claude credential is held` (`GET` 200, `PUT ?mode=adopt` 409 — the adopt conflict) and `no claude
+credential is held` (`GET` 200 `held:false`, `PUT ?mode=adopt` 204), which grant `Bearer
+contract-qits-target-runner` as `qits:target-runner` (the runner, their consumer; qits-2664).
 `ConsumerPactVerificationTest` verifies pinned consumer pacts (none yet; qits-deployments' push
 client is the first — then flip `ClasspathPactLoader.REQUIRED`).
 

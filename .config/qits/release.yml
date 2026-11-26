@@ -6,7 +6,7 @@ archetype: java-service
 artifacts:
   - { type: docker, name: qits/qits-egress, sbom: .sbom/sbom.json }
   # The committed OpenAPI document, published as `@apidocs/qits-egress` on every release
-  # (OpenApiSchemaExportTest keeps it current): the grant-table door.
+  # (OpenApiSchemaExportTest keeps it current): the grant-table door and the Claude credential door.
   - { type: docs, name: "@apidocs/qits-egress", path: docs/openapi.yml }
 
 # The userflow catalogue (service/src/test/.../stories/**IT), published as @userflows/qits-egress:
@@ -15,7 +15,8 @@ userflows: qits-egress
 
 # The provider golden masters: the platform packages `golden-masters/` as
 # `eu.wohlben.qits:qits-egress-golden-masters` (maven) and `@qits/egress-golden-masters` (npm).
-# contracts/GoldenMasterRecordingTest records them; the consumer is qits-deployments' push client.
+# contracts/GoldenMasterRecordingTest records them; the consumers are qits-deployments' push client
+# (the grant table) and the runner (the Claude credential door, qits-2664).
 #
 # THE PACTS this service writes as a consumer, flat in `pacts/`:
 #   qits-idp-service       quarkus-oidc's discovery and JWKS reads (which the proxy listener's caller
@@ -27,8 +28,8 @@ userflows: qits-egress
 #                          the anchors the TLS self-check trusts, GET /certificates/api/anchors as
 #                          JSON, state `one ACTIVE anchor` (tls/TlsSelfCheck, qits-2644).
 #
-# No entity map and no entity diagram: the grant table is stored by plain JDBC (one row, a JSON
-# body), so there is no @Entity to map.
+# No entity map and no entity diagram: the grant table (one row, a JSON body) and the Claude
+# credential (one row, qits-2664) are stored by plain JDBC, so there is no @Entity to map.
 contracts:
   application: qits-egress
   golden-masters: { from: golden-masters/, packages: [maven, npm] }
