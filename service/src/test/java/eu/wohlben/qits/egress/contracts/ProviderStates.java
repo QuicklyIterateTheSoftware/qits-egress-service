@@ -2,12 +2,16 @@ package eu.wohlben.qits.egress.contracts;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import eu.wohlben.qits.egress.api.ClaudeCredentialWire;
 import eu.wohlben.qits.egress.api.GrantTableWire;
+import eu.wohlben.qits.egress.claude.ClaudeCredentials;
 import eu.wohlben.qits.egress.grants.GrantIndex;
+import eu.wohlben.qits.egress.store.ClaudeCredentialStore;
 import eu.wohlben.qits.egress.store.GrantTableStore;
 import eu.wohlben.qits.egress.support.ContractCallers;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import java.time.Instant;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -33,6 +37,10 @@ import java.util.function.Supplier;
  * the same table qits-deployments' own golden master {@code an-egress-grant-table-with-one-route}
  * serves, at the same version. Every state starts from an empty store, so applying it twice is the
  * same state.
+ *
+ * <p>The Claude credential door's consumer is the runner (qits-system-runner-daemon, qits-2664): its
+ * states, {@value #A_CLAUDE_CREDENTIAL_IS_HELD} and {@value #NO_CLAUDE_CREDENTIAL_IS_HELD}, grant
+ * {@value #RUNNER_BEARER} as {@code qits:target-runner} and hand it as {@code authorization}.
  */
 @ApplicationScoped
 public class ProviderStates {
@@ -40,6 +48,39 @@ public class ProviderStates {
   public static final String A_GRANT_TABLE_IS_HELD = "a grant table is held";
 
   public static final String NO_GRANT_TABLE_IS_HELD = "no grant table is held";
+
+  public static final String A_CLAUDE_CREDENTIAL_IS_HELD = "a claude credential is held";
+
+  public static final String NO_CLAUDE_CREDENTIAL_IS_HELD = "no claude credential is held";
+
+  /** The runner's client in the suite: the Claude credential door's one writer (qits-2664). */
+  public static final String RUNNER = "contract-target-runner";
+
+  /** The bearer the runner presents. */
+  public static final String RUNNER_BEARER = "Bearer contract-qits-target-runner";
+
+  /** The login the held state holds; the door never answers either token. */
+  public static final ClaudeCredentialStore.Login HELD_LOGIN =
+      new ClaudeCredentialStore.Login(
+          "contract-held-access-token",
+          "contract-held-refresh-token",
+          Instant.parse("2026-12-01T12:00:00Z"),
+          Instant.parse("2027-12-01T12:00:00Z"),
+          "user:inference user:profile user:sessions:claude_code",
+          "max",
+          "default_claude_max_20x",
+          "hand-over " + RUNNER);
+
+  /** The {@code claudeAiOauth} both states' {@code PUT ?mode=adopt} sends. */
+  public static final ClaudeCredentialWire.ClaudeAiOauth ADOPTED_LOGIN =
+      new ClaudeCredentialWire.ClaudeAiOauth(
+          "contract-handed-over-access-token",
+          "contract-handed-over-refresh-token",
+          1796126400000L,
+          1827662400000L,
+          List.of("user:inference", "user:profile", "user:sessions:claude_code"),
+          "max",
+          "default_claude_max_20x");
 
   /** The deployer's client id in the suite's environment. */
   public static final String PUBLISHER = "dev-qits-deployments";
@@ -76,11 +117,17 @@ public class ProviderStates {
 
   @Inject GrantIndex index;
 
+  @Inject ClaudeCredentialStore claudeStore;
+
+  @Inject ClaudeCredentials claudeCredentials;
+
   @Inject ObjectMapper json;
 
   public ProviderStates() {
     states.put(A_GRANT_TABLE_IS_HELD, this::aGrantTableIsHeld);
     states.put(NO_GRANT_TABLE_IS_HELD, this::noGrantTableIsHeld);
+    states.put(A_CLAUDE_CREDENTIAL_IS_HELD, this::aClaudeCredentialIsHeld);
+    states.put(NO_CLAUDE_CREDENTIAL_IS_HELD, this::noClaudeCredentialIsHeld);
   }
 
   public Set<String> names() {
@@ -123,6 +170,21 @@ public class ProviderStates {
         Set.of("clients/" + PUBLISHER, "qits:system"));
   }
 
+  /** The {@link #ADOPTED_LOGIN} as the JSON the {@code PUT} sends. */
+  public static String adoptedLoginJson(ObjectMapper json) {
+    try {
+      return json.writeValueAsString(ADOPTED_LOGIN);
+    } catch (JsonProcessingException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  /** Grant {@link #RUNNER_BEARER} as the runner's own client: {@code qits:target-runner}. */
+  public static void grantRunner() {
+    ContractCallers.bearer(
+        RUNNER_BEARER, RUNNER, Set.of("clients/" + RUNNER), Set.of("qits:target-runner"));
+  }
+
   // --- the states ------------------------------------------------------------------------------
 
   private Setup aGrantTableIsHeld() {
@@ -136,6 +198,24 @@ public class ProviderStates {
     store.clear();
     index.refresh();
     return publisherParams();
+  }
+
+  private Setup aClaudeCredentialIsHeld() {
+    claudeStore.clear();
+    claudeStore.replace(HELD_LOGIN);
+    claudeCredentials.reload();
+    return runnerParams();
+  }
+
+  private Setup noClaudeCredentialIsHeld() {
+    claudeStore.clear();
+    claudeCredentials.reload();
+    return runnerParams();
+  }
+
+  private static Setup runnerParams() {
+    grantRunner();
+    return new Setup(Map.of("authorization", RUNNER_BEARER));
   }
 
   private static Setup publisherParams() {

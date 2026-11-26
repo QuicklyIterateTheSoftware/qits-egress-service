@@ -10,6 +10,9 @@ package eu.wohlben.qits.egress.api;
  *       {@code qits:desk-admin} and {@code qits:agent} for people, the desk and agents. A
  *       {@code qits:system} caller holding none of those is held to the publisher check too: the
  *       read is for the deployer's read-back, not for every service.
+ *   <li><b>{@code PUT /claude-credential}</b>: {@code qits:target-runner} only, the runner's idp
+ *       client (qits-2664). <b>{@code GET}</b>: {@code qits:agent}, {@code qits:system}, {@code
+ *       qits:admin} and {@code qits:target-runner}.
  * </ul>
  */
 public final class Roles {
@@ -19,6 +22,7 @@ public final class Roles {
   public static final String ADMIN_AGENT = "qits:admin-agent";
   public static final String DESK_ADMIN = "qits:desk-admin";
   public static final String AGENT = "qits:agent";
+  public static final String TARGET_RUNNER = "qits:target-runner";
 
   private Roles() {}
 }

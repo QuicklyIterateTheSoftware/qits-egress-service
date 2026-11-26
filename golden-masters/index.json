@@ -3,6 +3,65 @@
   "provider": "qits-egress",
   "states": [
     {
+      "name": "a claude credential is held",
+      "slug": "a-claude-credential-is-held",
+      "params": {
+        "authorization": "Bearer contract-qits-target-runner"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "getClaudeCredential",
+          "method": "GET",
+          "path": "/egress/api/claude-credential",
+          "headers": {
+            "Authorization": "{authorization}"
+          },
+          "status": 200,
+          "file": "a-claude-credential-is-held/getClaudeCredential.json",
+          "frozen": {
+            "ids": [],
+            "instants": [
+              "$.expiresAt",
+              "$.refreshExpiresAt",
+              "$.updatedAt"
+            ],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "putClaudeCredential",
+          "method": "PUT",
+          "path": "/egress/api/claude-credential?mode=adopt",
+          "headers": {
+            "Authorization": "{authorization}"
+          },
+          "body": {
+            "accessToken": "contract-handed-over-access-token",
+            "refreshToken": "contract-handed-over-refresh-token",
+            "expiresAt": 1796126400000,
+            "refreshTokenExpiresAt": 1827662400000,
+            "scopes": [
+              "user:inference",
+              "user:profile",
+              "user:sessions:claude_code"
+            ],
+            "subscriptionType": "max",
+            "rateLimitTier": "default_claude_max_20x"
+          },
+          "status": 409,
+          "file": "a-claude-credential-is-held/putClaudeCredential.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    },
+    {
       "name": "a grant table is held",
       "slug": "a-grant-table-is-held",
       "params": {
@@ -57,6 +116,61 @@
               }
             ],
             "refused": []
+          },
+          "status": 204,
+          "file": null,
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "no claude credential is held",
+      "slug": "no-claude-credential-is-held",
+      "params": {
+        "authorization": "Bearer contract-qits-target-runner"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "getClaudeCredential",
+          "method": "GET",
+          "path": "/egress/api/claude-credential",
+          "headers": {
+            "Authorization": "{authorization}"
+          },
+          "status": 200,
+          "file": "no-claude-credential-is-held/getClaudeCredential.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "putClaudeCredential",
+          "method": "PUT",
+          "path": "/egress/api/claude-credential?mode=adopt",
+          "headers": {
+            "Authorization": "{authorization}"
+          },
+          "body": {
+            "accessToken": "contract-handed-over-access-token",
+            "refreshToken": "contract-handed-over-refresh-token",
+            "expiresAt": 1796126400000,
+            "refreshTokenExpiresAt": 1827662400000,
+            "scopes": [
+              "user:inference",
+              "user:profile",
+              "user:sessions:claude_code"
+            ],
+            "subscriptionType": "max",
+            "rateLimitTier": "default_claude_max_20x"
           },
           "status": 204,
           "file": null,

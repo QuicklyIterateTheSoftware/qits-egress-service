@@ -51,19 +51,27 @@ final class Scrubber {
     this.longest = this.forms.stream().mapToInt(f -> f.length).max().orElse(0);
   }
 
-  /** The scrubber for one secret value. */
-  static Scrubber of(String secret) {
-    if (secret == null || secret.isEmpty()) {
+  /**
+   * The scrubber for one secret value — or several, each in all its forms (the held Claude access
+   * and refresh tokens, qits-2664).
+   */
+  static Scrubber of(String... secrets) {
+    if (secrets.length == 0) {
       throw new IllegalArgumentException("no secret to scrub");
     }
-    byte[] raw = secret.getBytes(StandardCharsets.UTF_8);
     Set<String> forms = new LinkedHashSet<>();
-    forms.add(secret);
-    forms.add(Base64.getEncoder().withoutPadding().encodeToString(raw));
-    forms.add(Base64.getUrlEncoder().withoutPadding().encodeToString(raw));
-    String encoded = URLEncoder.encode(secret, StandardCharsets.UTF_8);
-    forms.add(encoded);
-    forms.add(encoded.replace("+", "%20"));
+    for (String secret : secrets) {
+      if (secret == null || secret.isEmpty()) {
+        throw new IllegalArgumentException("no secret to scrub");
+      }
+      byte[] raw = secret.getBytes(StandardCharsets.UTF_8);
+      forms.add(secret);
+      forms.add(Base64.getEncoder().withoutPadding().encodeToString(raw));
+      forms.add(Base64.getUrlEncoder().withoutPadding().encodeToString(raw));
+      String encoded = URLEncoder.encode(secret, StandardCharsets.UTF_8);
+      forms.add(encoded);
+      forms.add(encoded.replace("+", "%20"));
+    }
     List<String> sorted = new ArrayList<>(forms);
     sorted.removeIf(String::isEmpty);
     sorted.sort(Comparator.comparingInt(String::length).reversed());

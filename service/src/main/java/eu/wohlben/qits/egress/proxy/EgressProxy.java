@@ -1,5 +1,6 @@
 package eu.wohlben.qits.egress.proxy;
 
+import eu.wohlben.qits.egress.claude.ClaudeCredentials;
 import eu.wohlben.qits.egress.grants.GrantIndex;
 import eu.wohlben.qits.egress.grants.GrantRoute;
 import eu.wohlben.qits.egress.identity.CallerIdentity;
@@ -12,6 +13,7 @@ import io.quarkus.runtime.StartupEvent;
 import io.vertx.core.Context;
 import io.vertx.core.Future;
 import io.vertx.core.MultiMap;
+import io.vertx.core.buffer.Buffer;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
@@ -52,7 +54,9 @@ import org.jboss.logging.Logger;
  * own, serving every request inside the tunnel like an absolute-form one ({@link Interception},
  * qits-2644). A connection spliced from a {@code GET /egress/api/forward} websocket ({@link
  * ForwardDoor}, qits-2654) carries its caller with it ({@link ForwardedCallers}); a principal with a
- * project reaches outside hosts no route covers through the {@link Passthrough}.
+ * project reaches outside hosts no route covers through the {@link Passthrough}, and the Claude
+ * hosts with the login this service holds ({@link ClaudeHosts}, qits-2664): granted routes first,
+ * then the Claude hosts, then the passthrough.
  *
  * <p>One call, in order:
  *
@@ -119,6 +123,10 @@ public class EgressProxy {
   @Inject LeafCertificates leaves;
 
   @Inject Passthrough passthrough;
+
+  @Inject ClaudeHosts claude;
+
+  @Inject ClaudeCredentials claudeCredentials;
 
   @ConfigProperty(name = "qits.egress.proxy.port", defaultValue = "8081")
   int port;
@@ -472,8 +480,11 @@ public class EgressProxy {
     // A plain-http target no route covers may pass through for a principal with a project; never
     // an https one (a proxy client tunnels those with CONNECT), so never a request inside a tunnel.
     boolean mayPass = target.scheme().equals("http") && passthrough.applies(verdict.principal());
+    boolean claudeHost =
+        target.scheme().equals("https")
+            && claude.serves(verdict.principal(), target.host(), target.port());
     GrantIndex.Table table = grants.current();
-    if (table == null && !mayPass) {
+    if (table == null && !mayPass && !claudeHost) {
       refuse(request, audit, 503, "no-table", error("no grant table yet"));
       return;
     }
@@ -483,6 +494,10 @@ public class EgressProxy {
     }
     String method = request.method().name();
     GrantRoute route = target.match(routes(table, verdict));
+    if (route == null && claudeHost) {
+      claude(call, target);
+      return;
+    }
     if (route == null && mayPass) {
       passthroughHttp(call, target);
       return;
@@ -523,8 +538,9 @@ public class EgressProxy {
     }
     audit.target(authority.toString(), "-");
     boolean mayPass = passthrough.applies(verdict.principal());
+    boolean claudeHost = claude.serves(verdict.principal(), authority.host(), authority.port());
     GrantIndex.Table table = grants.current();
-    if (table == null && !mayPass) {
+    if (table == null && !mayPass && !claudeHost) {
       refuse(request, audit, 503, "no-table", error("no grant table yet"));
       return;
     }
@@ -547,6 +563,12 @@ public class EgressProxy {
         break;
       }
     }
+    if (granted == null && reached == null && claudeHost) {
+      // A Claude host no route covers: intercepted all the same, its requests served by claude().
+      audit.route(ClaudeHosts.ROUTE);
+      interceptWithLeaf(call, authority, ClaudeHosts.ROUTE);
+      return;
+    }
     if (granted == null && reached == null && mayPass) {
       passthroughConnect(call, authority);
       return;
@@ -565,7 +587,16 @@ public class EgressProxy {
       return;
     }
     audit.route(granted.name());
-    GrantRoute route = granted;
+    interceptWithLeaf(call, authority, granted.name());
+  }
+
+  /**
+   * The host's leaf made sure of — held, or issued inline within {@code qits.egress.leaves.timeout}
+   * — or 503, reason {@code no-leaf}; then into the interception listener.
+   */
+  private void interceptWithLeaf(Call call, ConnectTunnel.Authority authority, String route) {
+    HttpServerRequest request = call.request();
+    AuditLine audit = call.audit();
     Context context = vertx.getOrCreateContext();
     leaves
         .issueNow(authority.host())
@@ -586,7 +617,7 @@ public class EgressProxy {
   }
 
   /** A granted {@code CONNECT} whose host's leaf is held: {@code 200}, and into the listener. */
-  private void intercept(Call call, ConnectTunnel.Authority authority, GrantRoute route, Leaf leaf) {
+  private void intercept(Call call, ConnectTunnel.Authority authority, String route, Leaf leaf) {
     AuditLine audit = call.audit();
     audit.allow();
     audit.leafSerial(leaf.serial());
@@ -594,7 +625,7 @@ public class EgressProxy {
         call.request(),
         intercepting.actualPort(),
         interception,
-        new Interception.Tunnel(call.verdict(), authority, route.name(), call.forwarded()),
+        new Interception.Tunnel(call.verdict(), authority, route, call.forwarded()),
         call.exchange(),
         audit);
   }
@@ -650,6 +681,132 @@ public class EgressProxy {
             tunnel.authority().port(),
             path,
             query == null || query.isEmpty() ? null : query));
+  }
+
+  /**
+   * A request to a Claude host no route covers, for a principal with a project ({@link
+   * ClaudeHosts}): Claude Code's placeholder refresh answered here, a placeholder bearer swapped for
+   * the held access token — or 503 when none is held — and the answer scrubbed of the held tokens.
+   * Audited {@code route=claude}.
+   */
+  private void claude(Call call, AbsoluteTarget target) {
+    HttpServerRequest request = call.request();
+    AuditLine audit = call.audit();
+    audit.route(ClaudeHosts.ROUTE);
+    String uri =
+        target.query() == null || target.query().isEmpty()
+            ? target.path()
+            : target.path() + "?" + target.query();
+    boolean placeholder =
+        ClaudeHosts.isPlaceholder(request.getHeader(HttpHeaders.AUTHORIZATION));
+    long length = contentLength(request);
+    if (ClaudeHosts.isTokenRequest(request.method(), target.host(), target.path())
+        && length >= 0
+        && length <= ClaudeHosts.TOKEN_BODY_LIMIT) {
+      // Read whole (it is small) to tell the placeholder's refresh from a real one.
+      request
+          .body()
+          .onComplete(
+              read -> {
+                if (read.failed()) {
+                  refuse(request, audit, 400, "bad-body", error("the request body cannot be read"));
+                  return;
+                }
+                Buffer body = read.result();
+                if (ClaudeHosts.placeholderRefresh(
+                    request.getHeader(HttpHeaders.CONTENT_TYPE), body)) {
+                  placeholderRefresh(request, audit);
+                  return;
+                }
+                claudeForward(call, target, uri, placeholder, body);
+              });
+      request.resume();
+      return;
+    }
+    claudeForward(call, target, uri, placeholder, null);
+  }
+
+  /** The placeholder's refresh: the placeholder again, with the held scopes; 503 with none held. */
+  private void placeholderRefresh(HttpServerRequest request, AuditLine audit) {
+    ClaudeCredentials.Held held = claudeCredentials.current();
+    if (held == null) {
+      refuse(request, audit, 503, "no-claude-credential", error("no claude credential held"));
+      return;
+    }
+    audit.allow().reason("claude-refresh");
+    HttpServerResponse response = request.response();
+    if (response.ended() || response.closed()) {
+      return;
+    }
+    response
+        .setStatusCode(200)
+        .putHeader(HttpHeaders.CONTENT_TYPE, "application/json")
+        .putHeader(HttpHeaders.CACHE_CONTROL, "no-store")
+        .end(ClaudeHosts.placeholderToken(held.scopes()).encode());
+  }
+
+  /**
+   * A Claude host's request on: the placeholder swapped (503 with none held), the caller's own
+   * credentials otherwise untouched, the held tokens scrubbed out of the answer — {@code
+   * Set-Cookie} dropped only when the held login was injected.
+   *
+   * @param body the request body when it was read whole, else null
+   */
+  private void claudeForward(
+      Call call, AbsoluteTarget target, String uri, boolean placeholder, Buffer body) {
+    HttpServerRequest request = call.request();
+    AuditLine audit = call.audit();
+    ClaudeCredentials.Held held = claudeCredentials.current();
+    if (placeholder && held == null) {
+      refuse(request, audit, 503, "no-claude-credential", error("no claude credential held"));
+      return;
+    }
+    audit.allow();
+    String accessToken = placeholder ? held.accessToken() : null;
+    Scrubber scrubber = held == null ? null : Scrubber.of(held.accessToken(), held.refreshToken());
+    RequestOptions options = claude.origin(target.host());
+    UpstreamOrigin dialled = new UpstreamOrigin(options.getHost(), options.getPort());
+    String authority = target.host() + ":" + target.port();
+    if (isWebSocketUpgrade(request)) {
+      audit.reason("websocket");
+      webSockets.handle(
+          request,
+          options,
+          uri,
+          ClaudeOutbound.handshake(request.headers(), accessToken),
+          scrubber,
+          accessToken != null,
+          call.exchange(),
+          audit);
+      return;
+    }
+    Pool pool = isStream(request) ? stream : ordinary;
+    HttpProxy proxy =
+        HttpProxy.reverseProxy(new ProxyOptions().setSupportWebSocket(false), pool.client())
+            .origin(origin(options, dialled, authority, pool, pool.client()))
+            .addInterceptor(new ClaudeOutbound(target.host(), uri, accessToken, body, audit));
+    if (scrubber != null) {
+      proxy.addInterceptor(new ResponseScrub(scrubber, accessToken != null, audit));
+    }
+    proxy
+        .addInterceptor(new EdgeHopByHop())
+        .addInterceptor(new EdgeRequestFraming())
+        .addInterceptor(
+            new UpstreamRetry(authority, origin(options, dialled, authority, pool, pool.fresh())))
+        .handle(request);
+  }
+
+  /** The request's {@code Content-Length}, or -1 when it names none or no number. */
+  private static long contentLength(HttpServerRequest request) {
+    String length = request.getHeader(HttpHeaders.CONTENT_LENGTH);
+    if (length == null) {
+      return -1;
+    }
+    try {
+      return Long.parseLong(length.trim());
+    } catch (NumberFormatException e) {
+      return -1;
+    }
   }
 
   /** The routes the caller holds in {@code table}, none when there is no table. */

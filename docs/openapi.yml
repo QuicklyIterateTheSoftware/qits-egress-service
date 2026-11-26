@@ -4,6 +4,52 @@
 openapi: 3.1.0
 components:
   schemas:
+    ClaudeAiOauth:
+      type: object
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        expiresAt:
+          type: integer
+          format: int64
+        refreshTokenExpiresAt:
+          type: integer
+          format: int64
+        scopes:
+          type: array
+          items:
+            type: string
+        subscriptionType:
+          type: string
+        rateLimitTier:
+          type: string
+    ClaudeCredentialStatus:
+      type: object
+      properties:
+        held:
+          type: boolean
+        expiresAt:
+          $ref: "#/components/schemas/Instant"
+        refreshExpiresAt:
+          $ref: "#/components/schemas/Instant"
+        scopes:
+          type: array
+          items:
+            type: string
+        subscriptionType:
+          type: string
+        rateLimitTier:
+          type: string
+        source:
+          type: string
+        updatedAt:
+          $ref: "#/components/schemas/Instant"
+        lastRefreshAt:
+          $ref: "#/components/schemas/Instant"
+        lastRefreshError:
+          type: string
     GrantTable:
       type: object
       properties:
@@ -18,6 +64,11 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Refused"
+    Instant:
+      type: string
+      format: date-time
+      examples:
+      - 2022-03-10T16:15:50Z
     Refused:
       type: object
       properties:
@@ -58,6 +109,61 @@ components:
       openIdConnectUrl: https://idp.qits.wohlben.eu/idp/.well-known/openid-configuration
       description: Authentication
 paths:
+  /egress/api/claude-credential:
+    put:
+      summary: Hand the Claude login over (adopt) or replace it after a sign-in (the
+        runner only)
+      operationId: putClaudeCredential
+      parameters:
+      - name: mode
+        in: query
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClaudeAiOauth"
+        required: true
+      responses:
+        "204":
+          description: Stored
+        "400":
+          description: "Not adopt or replace, a token or the expiry missing, or a\
+            \ placeholder"
+        "403":
+          description: Not the runner
+        "409":
+          description: "adopt, and a login is held already"
+        "401":
+          description: Not Authorized
+      tags:
+      - Claude Credential Resource
+      security:
+      - SecurityScheme:
+        - qits:target-runner
+    get:
+      summary: "Whether a Claude login is held, and its state — never a token"
+      operationId: getClaudeCredential
+      responses:
+        "200":
+          description: "The status, held or not"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClaudeCredentialStatus"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
+      tags:
+      - Claude Credential Resource
+      security:
+      - SecurityScheme:
+        - qits:agent
+        - qits:system
+        - qits:admin
+        - qits:target-runner
   /egress/api/grant-table:
     put:
       summary: Store the grant table in force (qits-deployments' own client only)

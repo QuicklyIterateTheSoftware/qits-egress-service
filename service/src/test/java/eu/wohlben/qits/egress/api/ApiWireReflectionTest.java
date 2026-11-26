@@ -4,11 +4,14 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 /**
- * {@link ApiWireReflection} is complete: every nested type of {@link GrantTableWire}. On a JVM
+ * {@link ApiWireReflection} is complete: every nested type of {@link GrantTableWire} and {@link
+ * ClaudeCredentialWire}. On a JVM
  * everything binds regardless; the failure this guards is a 500 in the native binary.
  */
 class ApiWireReflectionTest {
@@ -19,8 +22,9 @@ class ApiWireReflectionTest {
         ApiWireReflection.class.getAnnotation(RegisterForReflection.class);
     assertNotNull(registration, "the annotation IS the class");
     Set<Class<?>> registered = Set.of(registration.targets());
-    Class<?>[] nested = GrantTableWire.class.getDeclaredClasses();
-    assertTrue(nested.length >= 6, "the sweep found only " + nested.length + " wire types");
+    List<Class<?>> nested = new ArrayList<>(List.of(GrantTableWire.class.getDeclaredClasses()));
+    nested.addAll(List.of(ClaudeCredentialWire.class.getDeclaredClasses()));
+    assertTrue(nested.size() >= 10, "the sweep found only " + nested.size() + " wire types");
     for (Class<?> type : nested) {
       assertTrue(
           registered.contains(type),

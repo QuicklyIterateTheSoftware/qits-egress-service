@@ -2,6 +2,7 @@ package eu.wohlben.qits.egress.tls;
 
 import eu.wohlben.qits.egress.grants.GrantIndex;
 import eu.wohlben.qits.egress.grants.GrantTableAdopted;
+import eu.wohlben.qits.egress.proxy.ClaudeHosts;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
 import io.vertx.core.Vertx;
@@ -15,6 +16,8 @@ import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.Set;
+import java.util.TreeSet;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
@@ -22,7 +25,8 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  *
  * <ul>
  *   <li>every {@link GrantTableAdopted} — a push taken here, a refresh that read a moved version,
- *       the table loaded at boot — hands it the table's https hosts to pre-issue for;
+ *       the table loaded at boot — hands it the table's https hosts to pre-issue for, with the
+ *       Claude hosts ({@link ClaudeHosts}) always among them;
  *   <li>at startup the table already in force, should it have been adopted before this observer
  *       existed;
  *   <li>a periodic {@link LeafCertificates#tick} every {@code qits.egress.leaves.check-interval}
@@ -39,6 +43,8 @@ public class LeafWiring {
   @Inject GrantIndex index;
 
   @Inject LeafBearer bearer;
+
+  @Inject ClaudeHosts claude;
 
   /**
    * A {@link LeafIssuer} bean, when there is one: the suites' throwaway CA. A deployment has none,
@@ -97,15 +103,24 @@ public class LeafWiring {
   }
 
   void onTable(@Observes GrantTableAdopted adopted) {
-    leaves.want(LeafCertificates.httpsHosts(adopted.table()));
+    leaves.want(wanted(adopted.table()));
   }
 
   void start(@Observes StartupEvent ignored) {
-    GrantIndex.Table current = index.current();
-    if (current != null) {
-      leaves.want(LeafCertificates.httpsHosts(current));
-    }
+    leaves.want(wanted(index.current()));
     timer = vertx.setPeriodic(checkInterval.toMillis(), id -> leaves.tick());
+  }
+
+  /**
+   * The hosts to hold leaves for: the table's https hosts, and the Claude hosts (qits-2664), whose
+   * {@code CONNECT} is intercepted whatever the table says.
+   */
+  private Set<String> wanted(GrantIndex.Table table) {
+    Set<String> hosts = new TreeSet<>(claude.hosts());
+    if (table != null) {
+      hosts.addAll(LeafCertificates.httpsHosts(table));
+    }
+    return hosts;
   }
 
   void stop(@Observes ShutdownEvent ignored) {

@@ -117,4 +117,14 @@ class ConsumerPactVerificationTest {
   Map<String, String> noGrantTableIsHeld() {
     return states.params(ProviderStates.NO_GRANT_TABLE_IS_HELD);
   }
+
+  @State(ProviderStates.A_CLAUDE_CREDENTIAL_IS_HELD)
+  Map<String, String> aClaudeCredentialIsHeld() {
+    return states.params(ProviderStates.A_CLAUDE_CREDENTIAL_IS_HELD);
+  }
+
+  @State(ProviderStates.NO_CLAUDE_CREDENTIAL_IS_HELD)
+  Map<String, String> noClaudeCredentialIsHeld() {
+    return states.params(ProviderStates.NO_CLAUDE_CREDENTIAL_IS_HELD);
+  }
 }

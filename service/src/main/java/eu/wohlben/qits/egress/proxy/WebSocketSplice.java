@@ -72,6 +72,23 @@ final class WebSocketSplice {
       Scrubber scrubber,
       InFlight.Exchange exchange,
       AuditLine audit) {
+    handle(request, origin, uri, outbound, scrubber, scrubber != null, exchange, audit);
+  }
+
+  /**
+   * {@link #handle(HttpServerRequest, RequestOptions, String, MultiMap, Scrubber, InFlight.Exchange,
+   * AuditLine)}, saying whether the {@code 101}'s {@code Set-Cookie} is dropped: a Claude host's
+   * handshake that carried the caller's own credential keeps it (qits-2664).
+   */
+  void handle(
+      HttpServerRequest request,
+      RequestOptions origin,
+      String uri,
+      MultiMap outbound,
+      Scrubber scrubber,
+      boolean dropCookies,
+      InFlight.Exchange exchange,
+      AuditLine audit) {
     UpstreamOrigin dialled = new UpstreamOrigin(origin.getHost(), origin.getPort());
     UpstreamLease lease = UpstreamLease.of(request);
     long since = pools.acquiring();
@@ -86,7 +103,8 @@ final class WebSocketSplice {
         .onSuccess(
             handshake -> {
               pools.granted(dialled, since, handshake, lease, true);
-              forward(request, dialled, uri, outbound, scrubber, handshake, exchange, audit);
+              forward(
+                  request, dialled, uri, outbound, scrubber, dropCookies, handshake, exchange, audit);
             });
   }
 
@@ -101,6 +119,7 @@ final class WebSocketSplice {
       String uri,
       MultiMap outbound,
       Scrubber scrubber,
+      boolean dropCookies,
       HttpClientRequest handshake,
       InFlight.Exchange exchange,
       AuditLine audit) {
@@ -125,7 +144,8 @@ final class WebSocketSplice {
               })
           .onSuccess(
               response ->
-                  upgraded(request, dialled, handshake, response, scrubber, exchange, audit));
+                  upgraded(
+                      request, dialled, handshake, response, scrubber, dropCookies, exchange, audit));
     } catch (RuntimeException failure) {
       close(handshake);
       throw failure;
@@ -138,6 +158,7 @@ final class WebSocketSplice {
       HttpClientRequest handshake,
       HttpClientResponse response,
       Scrubber scrubber,
+      boolean dropCookies,
       InFlight.Exchange exchange,
       AuditLine audit) {
     audit.upstreamAnswered();
@@ -151,9 +172,11 @@ final class WebSocketSplice {
       HttpServerResponse accepted = request.response();
       accepted.setStatusCode(101);
       accepted.headers().addAll(response.headers());
-      if (scrubber != null) {
+      if (dropCookies) {
         // A secret route's: no session of the route's account reaches the caller (ResponseScrub).
         accepted.headers().remove(HttpHeaders.SET_COOKIE);
+      }
+      if (scrubber != null) {
         scrubber.scrub(accepted.headers());
       }
       exchange.splice();

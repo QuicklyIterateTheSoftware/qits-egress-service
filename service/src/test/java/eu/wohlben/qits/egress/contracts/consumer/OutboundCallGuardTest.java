@@ -73,7 +73,7 @@ class OutboundCallGuardTest {
               "builds the client IdpTokenExchange dials with"),
           Map.entry(
               "eu.wohlben.qits.egress.proxy.EgressProxy",
-              "the proxied call to a granted route's target: a third party, or a public platform" + " service passing the caller's own request through"),
+              "the proxied call to a granted route's target: a third party, or a public platform" + " service passing the caller's own request through; and a Claude host's call (qits-2664)"),
           Map.entry(
               "eu.wohlben.qits.egress.proxy.ProxyClients",
               "builds the proxy's upstream client"),
@@ -86,6 +86,12 @@ class OutboundCallGuardTest {
           Map.entry(
               "eu.wohlben.qits.egress.proxy.ForwardDoor",
               "a forward's loopback connection (a Vert.x NetClient) to this process' own proxy" + " listener on 127.0.0.1: no qits service"),
+          Map.entry(
+              "eu.wohlben.qits.egress.claude.ClaudeTokenEndpoint",
+              "the held Claude login's refresh at platform.claude.com/v1/oauth/token: a third" + " party, no qits service"),
+          Map.entry(
+              "eu.wohlben.qits.egress.claude.ClaudeCredentials",
+              "builds the client ClaudeTokenEndpoint dials with"),
           Map.entry(
               "eu.wohlben.qits.egress.tls.LeafDoor",
               "qits-certificates issueLeaf (CertificatesPactTest LEAF_ISSUED)"),

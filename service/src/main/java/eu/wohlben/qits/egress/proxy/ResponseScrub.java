@@ -30,8 +30,20 @@ final class ResponseScrub implements ProxyInterceptor {
 
   private final AuditLine audit;
 
+  /** Whether {@code Set-Cookie} is dropped: a secret was injected, so a session is the account's. */
+  private final boolean dropCookies;
+
   ResponseScrub(Scrubber scrubber, AuditLine audit) {
+    this(scrubber, true, audit);
+  }
+
+  /**
+   * @param dropCookies false on a Claude host's call that carried the caller's own credential
+   *     (qits-2664): the held tokens are still scrubbed, but a session it mints is the caller's
+   */
+  ResponseScrub(Scrubber scrubber, boolean dropCookies, AuditLine audit) {
     this.scrubber = scrubber;
+    this.dropCookies = dropCookies;
     this.audit = audit;
   }
 
@@ -62,7 +74,9 @@ final class ResponseScrub implements ProxyInterceptor {
       return context.sendResponse();
     }
     // A login page could hand the caller a fresh session of the route's account: never passed on.
-    response.headers().remove(HttpHeaders.SET_COOKIE);
+    if (dropCookies) {
+      response.headers().remove(HttpHeaders.SET_COOKIE);
+    }
     scrubber.scrub(response.headers());
     Body body = response.getBody();
     if (body != null && carriesBody(context.request().getMethod(), response.getStatusCode())) {

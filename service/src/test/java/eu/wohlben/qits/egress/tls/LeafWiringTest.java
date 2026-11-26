@@ -49,6 +49,9 @@ class LeafWiringTest {
         .put("/egress/api/grant-table")
         .then()
         .statusCode(204);
-    assertEquals(Set.of("api.hetzner.cloud"), leaves.wanted());
+    // The table's https host, and the Claude hosts whatever the table says (qits-2664).
+    assertEquals(
+        Set.of("api.hetzner.cloud", "api.anthropic.com", "platform.claude.com", "claude.ai"),
+        leaves.wanted());
   }
 }

@@ -34,8 +34,9 @@ import org.junit.jupiter.api.Test;
  * ProviderStates}), calls the operation, freezes ids and instants ({@link Freezer}) and renders
  * {@code golden-masters/<state-slug>/<operationId>.json}; then {@code golden-masters/index.json}
  * (format version 1). A 204 records no file ({@code "file": null}). qits-agents-service's recorder,
- * with one caller: every operation sends the state's {@code authorization} — qits-deployments' own
- * client, the only caller the push admits — recorded as the index's {@code headers: {Authorization:
+ * with one caller per state: every operation sends the state's {@code authorization} —
+ * qits-deployments' own client for the grant table, the runner's for the Claude credential —
+ * recorded as the index's {@code headers: {Authorization:
  * "{authorization}"}}, so the consumer's pact sends the bearer the state hands it.
  *
  * <p>The release gate fails any operation of {@code docs/openapi.yml} this table does not cover, so
@@ -64,6 +65,10 @@ class GoldenMasterRecordingTest {
 
   static final String TABLE = ProviderStates.tableJson(new ObjectMapper());
 
+  static final String CLAUDE_PATH = "/egress/api/claude-credential";
+
+  static final String ADOPTED = ProviderStates.adoptedLoginJson(new ObjectMapper());
+
   static final List<Interaction> INTERACTIONS =
       List.of(
           new Interaction(
@@ -78,6 +83,35 @@ class GoldenMasterRecordingTest {
               "PUT",
               TABLE_PATH,
               TABLE,
+              204),
+          new Interaction(
+              ProviderStates.A_CLAUDE_CREDENTIAL_IS_HELD,
+              "getClaudeCredential",
+              "GET",
+              CLAUDE_PATH,
+              null,
+              200),
+          // The adopt conflict: a login is held, so the hand-over answers 409 {"held":true}.
+          new Interaction(
+              ProviderStates.A_CLAUDE_CREDENTIAL_IS_HELD,
+              "putClaudeCredential",
+              "PUT",
+              CLAUDE_PATH + "?mode=adopt",
+              ADOPTED,
+              409),
+          new Interaction(
+              ProviderStates.NO_CLAUDE_CREDENTIAL_IS_HELD,
+              "getClaudeCredential",
+              "GET",
+              CLAUDE_PATH,
+              null,
+              200),
+          new Interaction(
+              ProviderStates.NO_CLAUDE_CREDENTIAL_IS_HELD,
+              "putClaudeCredential",
+              "PUT",
+              CLAUDE_PATH + "?mode=adopt",
+              ADOPTED,
               204));
 
   private static final ObjectMapper JSON = new ObjectMapper();
