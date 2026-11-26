@@ -41,8 +41,11 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
     passthrough (`Passthrough`, its rules and resolve-once check; `PassthroughNetwork`, the resolver
     and dial seam; `PassthroughOutbound`, what leaves for a plain-http target; the blind splice in
     `ConnectTunnel.blind`). qits-edge's
-    `DrainCount` has no copy: it repairs Quarkus' HTTP drain count, and the proxy listener is a
-    plain Vert.x server that `InFlight` counts itself.
+    `DrainCount` is copied for its `settle` only (qits-2660): the proxy listener is a plain Vert.x
+    server that `InFlight` counts itself, but a forward is a `toWebSocket()` on 8080, which Quarkus'
+    HTTP drain counts and never hears end. `ForwardDoor` settles every forward on its close and on a
+    failed upgrade — without it a shutdown waited out `quarkus.shutdown.timeout` (5 min) after any
+    forward. A new upgrade or splice on 8080 settles too (`ForwardDrainTest` is the pattern).
   - `tls/` the per-host leaves (qits-2643): `LeafCertificates` (pre-issue, renewal, backoff,
     `issueNow`, `leafFor`), `LeafDoor` (the dial at qits-certificates and the `LeafIssuer` on it),
     `LeafKeys` (key, CSR, chain check), `LeafBearer` (the `qits` client's token), `LeafWiring` (the

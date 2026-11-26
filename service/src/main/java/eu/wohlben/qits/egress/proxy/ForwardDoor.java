@@ -81,7 +81,11 @@ public class ForwardDoor {
   }
 
   void forward(RoutingContext context) {
-    HttpServerRequest request = context.request();
+    handle(context.request());
+  }
+
+  /** One forward, its request as Quarkus' router hands it ({@code ForwardDrainTest} calls this). */
+  void handle(HttpServerRequest request) {
     // Held until the caller is known and the listener dialled.
     request.pause();
     AuditLine audit = new AuditLine("GET", PATH).forwarded();
@@ -134,6 +138,7 @@ public class ForwardDoor {
                       failure -> {
                         forwards.release(localPort, forward);
                         outbound.close();
+                        DrainCount.settle(request);
                         audit.deny("bad-upgrade");
                         audit.write(400);
                         LOG.warnf("a forward's upgrade failed: %s", failure.toString());
@@ -148,6 +153,9 @@ public class ForwardDoor {
                             () -> {
                               forwards.release(localPort, forward);
                               audit.write(101);
+                              // Past toWebSocket() no response handler runs: Quarkus' drain is
+                              // told here, or it counts this forward until the process exits.
+                              DrainCount.settle(request);
                             });
                         outbound.resume();
                       });
