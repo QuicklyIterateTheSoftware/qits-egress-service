@@ -100,4 +100,18 @@ class ScrubberTest {
   void theScrubberNamesNoSecret() {
     assertEquals("Scrubber", scrubber.toString());
   }
+
+  @Test
+  void severalSecretsAreEachScrubbedStreamedToo() {
+    // The held Claude access and refresh tokens (qits-2664), one scrubber for both.
+    Scrubber both = Scrubber.of("sk-ant-oat01-access", "sk-ant-ort01-refresh");
+    assertEquals("a=[redacted] r=[redacted]", both.scrub("a=sk-ant-oat01-access r=sk-ant-ort01-refresh"));
+    Scrubber.Window window = both.window();
+    String out =
+        window.push(Buffer.buffer("x sk-ant-oat01-acc")).toString()
+            + window.push(Buffer.buffer("ess y sk-ant-ort01-re")).toString()
+            + window.push(Buffer.buffer("fresh z")).toString()
+            + window.finish().toString();
+    assertEquals("x [redacted] y [redacted] z", out);
+  }
 }
