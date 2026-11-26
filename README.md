@@ -6,7 +6,8 @@ directly: it calls qits-egress, which
 
 1. identifies the caller from its bearer (a JWT verified offline against qits-idp's JWKS, or an
    opaque `qits_tok_…` introspected at qits-idp) and maps it to a principal
-   (`application:<application>` for a platform service client);
+   (`application:<application>` for a platform service client, `project:<id>` or `agent:<id>` of a
+   project for a workspace's or a project agent's token);
 2. admits the call only if the **grant table** gives that principal the route, and the method is one
    of the route's `methods` (403 `{"error":"no grant",…}` otherwise);
 3. strips the caller's credentials and injects the route's secret (`QITS_EGRESS_SECRET_<NAME>`, a
@@ -90,15 +91,26 @@ no pact can describe it.
 | `GET /egress/api/grant-table` | the same publisher, `qits:admin`, `qits:admin-agent`, `qits:desk-admin`, `qits:agent` | 200 `{version, receivedAt, routes, refused}`, 404 when none is held |
 
 The body is exactly the deployer's table (`GET /deployments/api/egress-grants`): `{version,
-routes:[{application, environment, deployedVersion, name, target, secret, inject, methods[]}],
-refused:[{application, deployedVersion, reason}]}`. It is stored by plain JDBC in
+routes:[{principal, application, environment, deployedVersion, name, target, secret, inject,
+methods[]}], refused:[{principal, application, deployedVersion, reason}]}`. `principal` is
+`application:<app>` for an application's route (from its `.config/qits/egress.yml`) or
+`project:<projectId>` for a project's (its wrapper's `.config/qits/egress.yml`; `application` and
+`environment` null, `deployedVersion` the wrapper's `main`, the secret already resolved to
+`PROJECT_<SLUG>_<name>`). A table pushed before qits-2659 has no `principal`: each entry is then
+`application:<application>`'s (`GrantTableWire.principalOf`), and the held table is served with the
+field filled in. It is stored by plain JDBC in
 `egress.egress_grant_table` (one row, the body as `jsonb`); the conditional upsert stores only a
 higher version, so two replicas taking two pushes cannot store the older one last.
 
 **Replica sync** (`grants/GrantIndex`): the replica that took the push adopts it at once; every
 replica loads the table at boot and reads the held version every `qits.egress.grants.refresh` (5 s),
-re-reading the body only when it moved. In memory the table is an immutable index `(application,
+re-reading the body only when it moved. In memory the table is an immutable index `(principal,
 route name) → route`, compiled once (target, injection), replaced whole.
+`GrantIndex.Table.holders` says whose routes a caller holds, asked in order: its own principal, then,
+for an `agent:` principal, `project:<its project>` — agents are minted per launch, so grants are per
+project, and the audit line still names the agent. Of two routes of one name, the agent's own wins.
+Every form (gateway, absolute, `CONNECT` and the requests inside an intercepted tunnel) looks routes
+up this way; the passthrough is only for what no held route matches.
 
 ## The gateway (8081)
 
@@ -120,10 +132,11 @@ The gateway form, one call in this order (`proxy/EgressProxy`):
 2. **Principal**: `sub` = `${QITS_ENVIRONMENT}-<application>` with `groups` holding `clients/<sub>`
    and `qits:system` is `application:<application>`; else `agent:<agent>`, `project:<project>`,
    `subject:<sub>`. An `agent:` principal keeps the token's `project` claim (`Principal.project()`
-   answers it, and a `project:` principal's own name): an agent belongs to its project. Only
-   `application:` principals hold routes; a principal with a project gets the passthrough (below).
+   answers it, and a `project:` principal's own name): an agent belongs to its project, and holds
+   its project's routes. A principal with a project gets the passthrough (below) for what no route
+   matches.
 3. **No table held** → **503** `{"error":"no grant table yet"}`.
-4. **Grant**: the route (caller application, `<route>`) must exist and its `methods` hold the
+4. **Grant**: the route (caller principal — or, for an agent, its project — `<route>`) must exist and its `methods` hold the
    method, else **403** `{"error":"no grant","principal","route","method"}`. A path with a `.`/`..`
    segment is 400.
 5. A secret this process does not hold → **502** `{"error":"secret not configured"}`. A
@@ -131,9 +144,14 @@ The gateway form, one call in this order (`proxy/EgressProxy`):
 6. **Out** through `vertx-http-proxy` (bodies stream both ways) to `<target><rest>?<query>` over
    TLS, `Host` the target's. Removed: `Authorization`, `Proxy-Authorization`, `Cookie`, every
    `X-Qits-*` header and the hop-by-hop set. Injected: `inject: bearer` → `Authorization: Bearer
-   <secret>`; `inject: header:<Name>` → `<Name>: <secret>`. `Accept-Encoding: identity`, so the
-   answer can be scrubbed.
-7. **Back**, scrubbed (below), streamed as it arrives.
+   <secret>`; `inject: header:<Name>` → `<Name>: <secret>`; `inject: cookie:<name>` → `Cookie:
+   <name>=<secret>` (the whole header: the caller's own `Cookie` is gone; `<name>` an RFC 6265
+   token of at most 64 characters, as the deployer's parser checks). `Accept-Encoding: identity`,
+   so the answer can be scrubbed.
+7. **Back**, scrubbed (below), streamed as it arrives, with every `Set-Cookie` dropped: a login page
+   would otherwise hand the caller a session of the route's account. Only routes that inject a
+   secret drop it (a WebSocket handshake's answer too); a platform route and the passthrough pass
+   it on.
 
 ### Platform routes (`platform:<label>`)
 
@@ -324,7 +342,9 @@ The upstream may echo the credential — an error quoting the request, a redirec
 calling application must not learn it, so `proxy/Scrubber` replaces the secret, its base64
 (standard and URL alphabet) and its URL-encoded forms with `[redacted]`:
 
-- in every **response header** value, `Location` included;
+- in every **response header** value, `Location` included; every `Set-Cookie` is dropped first
+  (`ResponseScrub`, and `WebSocketSplice` for a handshake's answer), so no session the upstream
+  mints for the route's account reaches the caller;
 - in the **body**, streamed (`proxy/ScrubbingReadStream`): a byte is released as soon as no form
   can start at it, so at most `len(longest form) - 1` bytes are ever held back and a value split
   across chunks is still caught; `Content-Length` is removed and the answer leaves chunked;
@@ -383,7 +403,7 @@ table in force, certified by qits-certificates.
   the key held and name the host, or the answer is refused.
 - **Pre-issue**: every adopted grant table (`grants/GrantTableAdopted`, fired by `GrantIndex` on a
   push taken here, a refresh that read a moved version, and the load at boot) hands its https hosts
-  to `LeafCertificates.want`; each host without a valid leaf is issued asynchronously, at most
+  — of every principal's routes, a project's as well as an application's — to `LeafCertificates.want`; each host without a valid leaf is issued asynchronously, at most
   `qits.egress.leaves.concurrency` (4) at a time. Platform routes and unusable routes are skipped.
 - **Renewal** at `qits.egress.leaves.renew-fraction` (two thirds) of a leaf's life, checked every
   `qits.egress.leaves.check-interval` (5 s, in memory). A failure retries after a backoff doubling

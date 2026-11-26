@@ -102,6 +102,16 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
   `*.passthrough.test` names resolve to the literals a test lists, and a checked "public" address
   (`203.0.113.7`) is dialled on loopback, where the fake upstreams are. Never loosen the address
   check for a test instead.
+- **Routes are held by principal** (`GrantIndex.Table`, keyed by `GrantTableWire.Route.principal`,
+  which falls back to `application:<application>` for a table older than qits-2659). Every lookup
+  goes through `Table.route(Principal, name)` / `Table.routes(Principal)`, which ask
+  `Table.holders`: the caller's own principal, then an agent's `project:<its project>`. Never look a
+  route up by the application name or by a hand-built key, and never give an `application:` caller
+  a project's routes.
+- **A secret route drops `Set-Cookie`** (`ResponseScrub`; `WebSocketSplice` when it scrubs): a new
+  secret-injecting path drops it too. A platform route and the passthrough never do — that session
+  is the caller's. `inject: cookie:<name>` writes the whole `Cookie` header, after
+  `EgressOutbound.strip` removed the caller's.
 - **A route matched by origin is matched exactly** (`AbsoluteTarget.match`): scheme, host and port,
   with the single `http:80 → https:443` allowance. Never widen it to "any port" or a host suffix: a
   caller could then reach what no route declares.
@@ -155,6 +165,7 @@ Every one of these compares by default and fails with a diff; `-Dgolden.update=t
 | `pacts/*_qits-certificates-service.json` | `contracts/consumer/CertificatesPactTest` (`leaf issued`, through the real `LeafDoor.post` with the state's CSR; `one ACTIVE anchor`, through `TlsSelfCheck.anchors` with `Accept: application/json`) |
 | `pacts/*_qits-idp-service.json` | `contracts/consumer/IdpPactTest` (the mint row run by `IdpTokenMintPactTest`, the introspection rows by `IdpIntrospectionPactTest`, the exchange rows by `IdpTokenExchangePactTest`). Written by `IdpPactTest.theCommittedPactIsWhatTheRowsWrite`, not the library's `compareOrWritePactFile`: the exchange rows' form body gets a provider-state generator `$.subject_token = ${subjectToken}` the library cannot express (idp's states mint a fresh subject token) |
 | `golden-masters/**` | `contracts/GoldenMasterRecordingTest`, states in `contracts/ProviderStates` |
+| `golden-masters/**` of qits-deployments (read, not written) | `contracts/consumer/DeploymentsGrantTableTest` binds and indexes the deployer's `getEgressGrants` recordings (`an egress grant table with a project route`, `… with one route`, `an empty …`): the table it pushes here. Not a pact, since this service never calls qits-deployments; the pin `qits.deployments-golden-masters.version` moves with maintenance's bumps |
 | `docs/openapi.yml` | `api/OpenApiSchemaExportTest` (always rewrites; the diff is the review) |
 
 The release gate fails any operation of `docs/openapi.yml` that `golden-masters/index.json` does not
