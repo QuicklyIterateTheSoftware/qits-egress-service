@@ -3,6 +3,7 @@
   "receivedAt": "2026-01-01T00:00:00Z",
   "routes": [
     {
+      "principal": "application:qits-edge",
       "application": "qits-edge",
       "environment": "dev",
       "deployedVersion": "2026.1201.101010",

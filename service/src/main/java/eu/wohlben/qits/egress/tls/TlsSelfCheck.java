@@ -3,6 +3,7 @@ package eu.wohlben.qits.egress.tls;
 import eu.wohlben.qits.egress.grants.GrantIndex;
 import eu.wohlben.qits.egress.grants.GrantRoute;
 import eu.wohlben.qits.egress.grants.GrantTableAdopted;
+import eu.wohlben.qits.egress.identity.Principal;
 import eu.wohlben.qits.egress.proxy.EgressProxy;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
@@ -180,7 +181,7 @@ public class TlsSelfCheck {
     if (table == null) {
       return null;
     }
-    GrantRoute route = table.route(application, ROUTE);
+    GrantRoute route = table.route(new Principal(Principal.APPLICATION, application), ROUTE);
     if (route == null
         || route.isPlatform()
         || !route.ssl()

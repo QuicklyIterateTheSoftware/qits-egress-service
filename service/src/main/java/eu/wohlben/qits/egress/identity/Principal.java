@@ -18,9 +18,10 @@ import io.vertx.core.json.JsonObject;
  * belongs to its project, and is granted what its project is ({@link #project()}). The printed form
  * is still {@code agent:<agent>}, so the audit line names the agent.
  *
- * <p>Only an {@code application:} principal matches routes: the table holds application routes only
- * (qits-2525 adds declarations for the others). A principal with a project gets the passthrough
- * ({@code proxy/Passthrough}); an application never does.
+ * <p>The table holds routes of {@code application:} and {@code project:} principals (qits-2525): a
+ * caller holds its own principal's routes and, as an {@code agent:}, its project's ({@code
+ * grants/GrantIndex.Table#holders}). A principal with a project gets the passthrough ({@code
+ * proxy/Passthrough}) for what no route matches; an application never does.
  *
  * @param kind {@code application}, {@code agent}, {@code project} or {@code subject}
  * @param name what follows the colon

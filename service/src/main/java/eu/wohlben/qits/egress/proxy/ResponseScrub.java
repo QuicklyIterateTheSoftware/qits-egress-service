@@ -13,7 +13,8 @@ import io.vertx.httpproxy.ProxyResponse;
 /**
  * <b>A secret route's answer, scrubbed</b> ({@link Scrubber}): the request asks for {@code
  * Accept-Encoding: identity}, so the body is readable; every response header value is scrubbed,
- * {@code Location} included; the body is streamed through {@link ScrubbingReadStream}, and its
+ * {@code Location} included, and {@code Set-Cookie} dropped (qits-2525: the session a login page
+ * would hand out is the route account's, not the caller's); the body is streamed through {@link ScrubbingReadStream}, and its
  * {@code Content-Length} goes, since a replacement changes it — the answer leaves chunked.
  *
  * <p><b>An encoded answer is refused</b>: an upstream that compresses whatever it was asked for
@@ -60,6 +61,8 @@ final class ResponseScrub implements ProxyInterceptor {
                       .encode())));
       return context.sendResponse();
     }
+    // A login page could hand the caller a fresh session of the route's account: never passed on.
+    response.headers().remove(HttpHeaders.SET_COOKIE);
     scrubber.scrub(response.headers());
     Body body = response.getBody();
     if (body != null && carriesBody(context.request().getMethod(), response.getStatusCode())) {

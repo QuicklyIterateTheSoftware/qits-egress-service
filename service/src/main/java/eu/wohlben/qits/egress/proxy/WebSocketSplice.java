@@ -152,6 +152,8 @@ final class WebSocketSplice {
       accepted.setStatusCode(101);
       accepted.headers().addAll(response.headers());
       if (scrubber != null) {
+        // A secret route's: no session of the route's account reaches the caller (ResponseScrub).
+        accepted.headers().remove(HttpHeaders.SET_COOKIE);
         scrubber.scrub(accepted.headers());
       }
       exchange.splice();

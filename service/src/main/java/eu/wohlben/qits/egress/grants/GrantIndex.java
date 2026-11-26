@@ -2,6 +2,7 @@ package eu.wohlben.qits.egress.grants;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.egress.api.GrantTableWire;
+import eu.wohlben.qits.egress.identity.Principal;
 import eu.wohlben.qits.egress.store.GrantTableStore;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
@@ -13,7 +14,10 @@ import jakarta.inject.Inject;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.time.Duration;
+import java.util.Collection;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -21,8 +25,8 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 /**
- * <b>The grant table this replica enforces</b>: an immutable index {@code (application, route
- * name) → route}, replaced whole and never mutated, so a request reads one consistent table without
+ * <b>The grant table this replica enforces</b>: an immutable index {@code (principal, route name)
+ * → route}, replaced whole and never mutated, so a request reads one consistent table without
  * a lock.
  *
  * <p><b>How the two replicas agree.</b> The push lands on one of them ({@code PUT
@@ -42,25 +46,62 @@ public class GrantIndex {
 
   private static final Logger LOG = Logger.getLogger(GrantIndex.class);
 
-  /** One adopted table. */
+  /**
+   * One adopted table: {@code principal → route name → route}, the principal as the table names it
+   * ({@code application:<application>}, {@code project:<projectId>}).
+   */
   public record Table(long version, Map<String, Map<String, GrantRoute>> routes) {
 
-    /** The route {@code name} granted to {@code application}, or null. */
-    public GrantRoute route(String application, String name) {
-      if (application == null || name == null) {
-        return null;
+    /**
+     * The principals whose routes {@code caller} holds, in the order they are asked: its own, then,
+     * for an {@code agent:} principal, {@code project:<its project>} — an agent is granted what its
+     * project is (qits-2525). Empty for none.
+     */
+    public static List<String> holders(Principal caller) {
+      if (caller == null) {
+        return List.of();
       }
-      Map<String, GrantRoute> granted = routes.get(application);
-      return granted == null ? null : granted.get(name);
+      String own = caller.toString();
+      if (Principal.AGENT.equals(caller.kind()) && caller.project() != null) {
+        String project = Principal.PROJECT + ":" + caller.project();
+        return own.equals(project) ? List.of(own) : List.of(own, project);
+      }
+      return List.of(own);
     }
 
-    /** Every route granted to {@code application}, in no particular order; empty for none. */
-    public java.util.Collection<GrantRoute> routes(String application) {
-      if (application == null) {
-        return java.util.List.of();
+    /** The route {@code name} {@code caller} holds — its own first, then its project's — or null. */
+    public GrantRoute route(Principal caller, String name) {
+      if (name == null) {
+        return null;
       }
-      Map<String, GrantRoute> granted = routes.get(application);
-      return granted == null ? java.util.List.of() : granted.values();
+      for (String holder : holders(caller)) {
+        Map<String, GrantRoute> granted = routes.get(holder);
+        GrantRoute route = granted == null ? null : granted.get(name);
+        if (route != null) {
+          return route;
+        }
+      }
+      return null;
+    }
+
+    /**
+     * Every route {@code caller} holds, in no particular order; empty for none. Of two of one name
+     * (an agent's own and its project's), its own.
+     */
+    public Collection<GrantRoute> routes(Principal caller) {
+      List<String> holders = holders(caller);
+      if (holders.size() == 1) {
+        Map<String, GrantRoute> granted = routes.get(holders.get(0));
+        return granted == null ? List.of() : granted.values();
+      }
+      Map<String, GrantRoute> held = new LinkedHashMap<>();
+      for (String holder : holders) {
+        Map<String, GrantRoute> granted = routes.get(holder);
+        if (granted != null) {
+          granted.forEach(held::putIfAbsent);
+        }
+      }
+      return List.copyOf(held.values());
     }
   }
 
@@ -192,9 +233,11 @@ public class GrantIndex {
   }
 
   /**
-   * Compile a table. A route without an application or a name cannot be looked up and is dropped;
-   * a second route of one name for one application (two environments in one table) keeps the first.
-   * Package-visible and static so it is asserted alone.
+   * Compile a table, keyed by each route's principal ({@link GrantTableWire.Route#principal()}: a
+   * table older than qits-2659 names none, and its routes are {@code application:<application>}'s).
+   * A route without a principal or a name cannot be looked up and is dropped; a second route of one
+   * name for one principal (two environments in one table) keeps the first. Package-visible and
+   * static so it is asserted alone.
    */
   static Table index(GrantTableWire.GrantTable table, boolean allowPlainHttp) {
     return index(table, allowPlainHttp, GrantRoute.DEFAULT_PLATFORM_ORIGIN);
@@ -204,28 +247,28 @@ public class GrantIndex {
       GrantTableWire.GrantTable table, boolean allowPlainHttp, String platformOrigin) {
     Map<String, Map<String, GrantRoute>> routes = new HashMap<>();
     for (GrantTableWire.Route route : table.routes()) {
-      if (route.application() == null || route.name() == null) {
-        LOG.warnf("table %d: a route without an application or a name is dropped", table.version());
+      if (route.principal() == null || route.name() == null) {
+        LOG.warnf("table %d: a route without a principal or a name is dropped", table.version());
         continue;
       }
       GrantRoute compiled = GrantRoute.of(route, allowPlainHttp, platformOrigin);
       if (compiled.problem() != null) {
         LOG.warnf(
             "table %d: route %s of %s cannot be served: %s",
-            table.version(), route.name(), route.application(), compiled.problem());
+            table.version(), route.name(), route.principal(), compiled.problem());
       }
       GrantRoute first =
           routes
-              .computeIfAbsent(route.application(), k -> new HashMap<>())
+              .computeIfAbsent(route.principal(), k -> new HashMap<>())
               .putIfAbsent(route.name(), compiled);
       if (first != null) {
         LOG.warnf(
             "table %d: route %s of %s is declared twice; the first is served",
-            table.version(), route.name(), route.application());
+            table.version(), route.name(), route.principal());
       }
     }
     Map<String, Map<String, GrantRoute>> frozen = new HashMap<>();
-    routes.forEach((application, named) -> frozen.put(application, Map.copyOf(named)));
+    routes.forEach((principal, named) -> frozen.put(principal, Map.copyOf(named)));
     return new Table(table.version(), Map.copyOf(frozen));
   }
 

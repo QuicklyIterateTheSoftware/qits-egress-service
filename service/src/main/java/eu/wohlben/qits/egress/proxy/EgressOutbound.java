@@ -21,7 +21,9 @@ import java.util.Locale;
  * Proxy-Authorization}, {@code Cookie} and every {@code X-Qits-*} header — the caller's identity
  * and platform context are the platform's, never a third party's. The hop-by-hop set goes in {@link
  * EdgeHopByHop}, next in the chain. Then the secret: {@code inject: bearer} writes {@code
- * Authorization: Bearer <secret>}, {@code inject: header:<Name>} writes {@code <Name>: <secret>}.
+ * Authorization: Bearer <secret>}, {@code inject: header:<Name>} writes {@code <Name>: <secret>},
+ * {@code inject: cookie:<name>} writes {@code Cookie: <name>=<secret>} — the whole header, since the
+ * caller's own {@code Cookie} was stripped first.
  *
  * <p>First in the chain, so every later interceptor (and {@link UpstreamRetry}'s second attempt)
  * sends what this one wrote. Its response hook records that the upstream answered, which the audit

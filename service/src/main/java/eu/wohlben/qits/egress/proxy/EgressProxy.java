@@ -63,9 +63,11 @@ import org.jboss.logging.Logger;
  *       the forward's caller; one with it is whoever the header says.
  *   <li><b>A table</b> — with none held, 503 {@code {"error":"no grant table yet"}}, reason {@code
  *       no-table}.
- *   <li><b>The grant</b> — the route {@code (caller application, <route>)} must exist and its
+ *   <li><b>The grant</b> — the route {@code (caller principal, <route>)} must exist and its
  *       {@code methods} hold the request's method: otherwise 403 {@code {"error":"no grant",
- *       "principal","route","method"}}. Only an {@code application:} principal holds routes.
+ *       "principal","route","method"}}. The caller's own principal is asked first, then, for an
+ *       {@code agent:} principal, {@code project:<its project>} ({@link GrantIndex.Table#holders}):
+ *       an agent holds its project's routes. The passthrough is only for what no route matches.
  *   <li><b>The route can be served</b> — a route whose target or injection the index could not
  *       compile is 502; a secret this process does not hold is 502 {@code {"error":"secret not
  *       configured"}}, reason {@code no-secret}; a {@code platform:} route needs the caller's
@@ -441,7 +443,7 @@ public class EgressProxy {
       return;
     }
     String method = request.method().name();
-    GrantRoute route = table.route(verdict.principal().application(), gateway.route());
+    GrantRoute route = table.route(verdict.principal(), gateway.route());
     if (route == null || !route.methods().contains(method)) {
       refuse(
           request,
@@ -652,7 +654,7 @@ public class EgressProxy {
 
   /** The routes the caller holds in {@code table}, none when there is no table. */
   private static Collection<GrantRoute> routes(GrantIndex.Table table, CallerIdentity.Verdict verdict) {
-    return table == null ? List.of() : table.routes(verdict.principal().application());
+    return table == null ? List.of() : table.routes(verdict.principal());
   }
 
   /**

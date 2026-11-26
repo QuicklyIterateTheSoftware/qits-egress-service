@@ -9,9 +9,10 @@ import java.util.regex.Pattern;
 
 /**
  * One route of the table, compiled once when the table is adopted, so nothing on the request path
- * parses a target: the grant {@code (application, name, methods)} and where and how it goes.
+ * parses a target: the grant {@code (principal, name, methods)} and where and how it goes.
  *
- * @param application the granted application ({@code application:<application>})
+ * @param principal who it is granted to: {@code application:<application>} or {@code
+ *     project:<projectId>}
  * @param name the first path segment at the gateway
  * @param methods upper-case HTTP methods
  * @param platform the {@code platform:<label>} label, or null for an outside target; a platform
@@ -23,13 +24,14 @@ import java.util.regex.Pattern;
  * @param basePath the target's path, no trailing slash, "" for none
  * @param secret the secret's name: its value is {@code QITS_EGRESS_SECRET_<secret>}
  * @param injectHeader the header the secret goes in
- * @param injectPrefix what precedes the secret in that header ({@code "Bearer "} or "")
+ * @param injectPrefix what precedes the secret in that header ({@code "Bearer "}, {@code "<name>="}
+ *     for a cookie, or "")
  * @param problem why this route cannot be served (a bad target, a bad injection), or null
  * @param targetProblem why its TARGET cannot be dialled, or null: all a {@code CONNECT} needs, since a
  *     tunnel injects nothing
  */
 public record GrantRoute(
-    String application,
+    String principal,
     String name,
     Set<String> methods,
     String platform,
@@ -57,7 +59,16 @@ public record GrantRoute(
   /** RFC 9110 token characters: what a header name may be made of. */
   private static final Pattern TOKEN = Pattern.compile("[!#$%&'*+.^_`|~0-9A-Za-z-]+");
 
-  private static final Pattern SECRET = Pattern.compile("[A-Z][A-Z0-9_]{0,63}");
+  /** A cookie name: an RFC 6265 token of at most 64 characters, as the deployer's parser says. */
+  private static final Pattern COOKIE = Pattern.compile("[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}");
+
+  static final String COOKIE_PREFIX = "cookie:";
+
+  /**
+   * A secret's name. A project route's arrives resolved, {@code PROJECT_<SLUG>_<name>} (a 63-character
+   * slug and a 64-character name at most), so the length allows that.
+   */
+  private static final Pattern SECRET = Pattern.compile("[A-Z][A-Z0-9_]{0,135}");
 
   /** Whether the target is a platform service ({@code platform:<label>}, qits-2623). */
   public boolean isPlatform() {
@@ -104,12 +115,12 @@ public record GrantRoute(
       if (!PLATFORM_LABEL.matcher(label).matches()) {
         String problem = "the platform label is not [a-z][a-z0-9-]*";
         return new GrantRoute(
-            route.application(), route.name(), Set.copyOf(methods), label, true, null, -1, "",
+            route.principal(), route.name(), Set.copyOf(methods), label, true, null, -1, "",
             null, null, null, problem, problem);
       }
       Target origin = Target.parse(platformOrigin.replace(LABEL, label), allowPlainHttp);
       return new GrantRoute(
-          route.application(),
+          route.principal(),
           route.name(),
           Set.copyOf(methods),
           label,
@@ -140,8 +151,13 @@ public record GrantRoute(
         && TOKEN.matcher(inject.substring("header:".length())).matches()) {
       injectHeader = inject.substring("header:".length());
       injectPrefix = "";
+    } else if (inject.startsWith(COOKIE_PREFIX)
+        && COOKIE.matcher(inject.substring(COOKIE_PREFIX.length())).matches()) {
+      // The route's own cookie is the whole header: the caller's Cookie never leaves (EgressOutbound).
+      injectHeader = "Cookie";
+      injectPrefix = inject.substring(COOKIE_PREFIX.length()) + "=";
     } else if (problem == null) {
-      problem = "the injection is neither bearer nor header:<Name>";
+      problem = "the injection is neither bearer, header:<Name> nor cookie:<name>";
     }
     if (route.secret() == null || !SECRET.matcher(route.secret()).matches()) {
       if (problem == null) {
@@ -149,7 +165,7 @@ public record GrantRoute(
       }
     }
     return new GrantRoute(
-        route.application(),
+        route.principal(),
         route.name(),
         Set.copyOf(methods),
         null,

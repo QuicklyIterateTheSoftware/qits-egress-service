@@ -40,6 +40,7 @@
             "version": 1764061200000,
             "routes": [
               {
+                "principal": "application:qits-edge",
                 "application": "qits-edge",
                 "environment": "dev",
                 "deployedVersion": "2026.1201.101010",
@@ -104,6 +105,7 @@
             "version": 1764061200000,
             "routes": [
               {
+                "principal": "application:qits-edge",
                 "application": "qits-edge",
                 "environment": "dev",
                 "deployedVersion": "2026.1201.101010",
