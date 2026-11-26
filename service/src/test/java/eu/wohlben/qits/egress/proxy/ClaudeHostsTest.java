@@ -23,12 +23,14 @@ import io.vertx.core.http.HttpServerResponse;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.net.HostAndPort;
 import io.vertx.core.net.KeyCertOptions;
+import io.vertx.core.net.SocketAddress;
 import jakarta.inject.Inject;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
@@ -53,7 +55,9 @@ import org.junit.jupiter.api.Test;
  * intercepted, the placeholder bearer is swapped for the held access token and any other bearer
  * passes unchanged, Claude Code's placeholder refresh is answered here, the held tokens are
  * scrubbed out of the answers — an SSE answer still streamed — a WebSocket handshake takes the same
- * swap, and with nothing held a placeholder request is 503. An application gets none of it.
+ * swap, and a login gone inside such a tunnel makes a placeholder request 503. With nothing held at
+ * the {@code CONNECT} the tunnel is not intercepted at all: a blind passthrough splice (qits-2525's
+ * outage fix). An application gets none of it.
  *
  * <p>The Claude hosts are dialled on the suite's fake https upstream ({@link SuiteClaudeUpstream}:
  * {@code localhost:<port>}, its certificate for {@code localhost}); the request still names the
@@ -65,6 +69,9 @@ class ClaudeHostsTest {
   static final String API = "api.anthropic.com";
 
   static final String PLATFORM = "platform.claude.com";
+
+  /** A made-up public address {@link #API} resolves to for the passthrough, dialled on loopback. */
+  static final String API_ADDRESS = "203.0.113.47";
 
   static final String ACCESS = "sk-ant-oat01-held-access-7f3e";
 
@@ -425,22 +432,22 @@ class ClaudeHostsTest {
   }
 
   @Test
-  void withNothingHeldAPlaceholderRequestIs503() throws Exception {
-    store.clear();
-    credentials.reload();
-    try (SSLSocket tls = tunnel(API)) {
-      Answer refused = exchange(tls, get("/v1/models", API, "Bearer qits-egress-placeholder"));
+  void aLoginGoneInsideAnInterceptedTunnelIs503() throws Exception {
+    try (SSLSocket api = tunnel(API);
+        SSLSocket platform = tunnel(PLATFORM)) {
+      // Intercepted while held; the login goes before the inner requests arrive.
+      store.clear();
+      credentials.reload();
+      Answer refused = exchange(api, get("/v1/models", API, "Bearer qits-egress-placeholder"));
       assertEquals(503, refused.head().status());
       assertEquals(new JsonObject().put("error", "no claude credential held"), new JsonObject(refused.body()));
       assertTrue(
           audit.await(l -> l.contains(" method=GET ")).contains(" reason=no-claude-credential "));
-      Answer own = exchange(tls, get("/v1/models", API, "Bearer sk-ant-oat01-the-callers-own"));
+      Answer own = exchange(api, get("/v1/models", API, "Bearer sk-ant-oat01-the-callers-own"));
       assertEquals(200, own.head().status(), "a container not cut over still works");
-    }
-    try (SSLSocket tls = tunnel(PLATFORM)) {
       Answer refresh =
           exchange(
-              tls,
+              platform,
               post(
                   "/v1/oauth/token",
                   PLATFORM,
@@ -449,6 +456,71 @@ class ClaudeHostsTest {
       assertEquals(503, refresh.head().status());
     }
     assertEquals(1, RECEIVED.size(), "only the caller's own bearer went upstream");
+  }
+
+  @Test
+  void withNothingHeldAClaudeHostIsSplicedBlind() throws Exception {
+    store.clear();
+    credentials.reload();
+    SuitePassthroughNetwork.NAMES.put(API, List.of(API_ADDRESS));
+    SuitePassthroughNetwork.DIALS.put(
+        API_ADDRESS + ":443", SocketAddress.inetSocketAddress(upstream.actualPort(), "127.0.0.1"));
+    try (Socket tunnel = connect(API + ":443", agentToken())) {
+      assertEquals(200, ProxyWire.head(tunnel.getInputStream()).status());
+      // Our leaf CA is no good here: the handshake is the upstream's own, end to end.
+      SSLContext context = SuiteTls.ca(SuiteTls.UPSTREAM).clientContext();
+      try (SSLSocket tls =
+          (SSLSocket) context.getSocketFactory().createSocket(tunnel, API, 443, true)) {
+        SSLParameters parameters = tls.getSSLParameters();
+        parameters.setServerNames(List.of(new SNIHostName(API)));
+        parameters.setApplicationProtocols(new String[] {"http/1.1"});
+        tls.setSSLParameters(parameters);
+        tls.startHandshake();
+        assertEquals(
+            SuiteTls.ca(SuiteTls.UPSTREAM).certificate().getSubjectX500Principal(),
+            ((X509Certificate) tls.getSession().getPeerCertificates()[0]).getIssuerX500Principal(),
+            "no interception: the upstream's certificate");
+        Answer answer = exchange(tls, get("/v1/models", API, "Bearer qits-egress-placeholder"));
+        assertEquals(200, answer.head().status());
+        Received received = RECEIVED.poll(5, TimeUnit.SECONDS);
+        assertNotNull(received);
+        assertEquals(
+            "Bearer qits-egress-placeholder",
+            received.headers().get("Authorization"),
+            "nothing swapped: the bytes are the caller's");
+      }
+    } finally {
+      SuitePassthroughNetwork.NAMES.remove(API);
+      SuitePassthroughNetwork.DIALS.remove(API_ADDRESS + ":443");
+    }
+    String line = audit.await(l -> l.contains(" method=CONNECT "));
+    assertTrue(
+        line.startsWith(
+            "egress decision=ALLOW principal=agent:developer route=- method=CONNECT target=" + API
+                + ":443 path=- status=200"),
+        line);
+    assertTrue(line.endsWith(" passthrough=true"), line);
+    assertFalse(line.contains("route=claude"), line);
+    assertFalse(line.contains("tls=intercepted"), line);
+    assertTrue(audit.lines.stream().noneMatch(l -> l.contains(" method=GET ")), "nothing seen inside");
+  }
+
+  @Test
+  void aLoginHeldAgainIsInterceptedAgain() throws Exception {
+    store.clear();
+    credentials.reload();
+    // Held again (a hand-over): the next CONNECT is intercepted, no restart needed.
+    audit.close();
+    holdALogin();
+    try (SSLSocket tls = tunnel(API)) {
+      Answer swapped = exchange(tls, get("/v1/models", API, "Bearer qits-egress-placeholder"));
+      assertEquals(200, swapped.head().status());
+      Received received = RECEIVED.poll(5, TimeUnit.SECONDS);
+      assertNotNull(received);
+      assertEquals("Bearer " + ACCESS, received.headers().get("Authorization"), "swapped");
+    }
+    assertTrue(
+        audit.await(l -> l.contains(" method=CONNECT ")).contains(" tls=intercepted leafSerial="));
   }
 
   @Test
