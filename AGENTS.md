@@ -111,7 +111,10 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
   "reason"}` with audit reason `passthrough-<reason>`.
 - **The Claude hosts come after every granted route and before the passthrough**
   (`EgressProxy.connect`/`absolute`, `ClaudeHosts.serves`): a principal with a project, a host of
-  `qits.egress.claude.hosts`, port 443 only. Only `Authorization: Bearer qits-egress-placeholder` is
+  `qits.egress.claude.hosts`, port 443 only — and a `CONNECT` is intercepted **only while a login
+  is held** (`ClaudeCredentials.current() != null`, the in-memory copy, never a store read per
+  `CONNECT`); with none held it is a blind passthrough splice, so a container without the
+  platform's anchor keeps working until the hand-over. Only `Authorization: Bearer qits-egress-placeholder` is
   rewritten; any other `Authorization` and the caller's `Cookie` go on unchanged — never run
   `EgressOutbound`'s strip there. Both held tokens are scrubbed out of every answer, `Set-Cookie`
   dropped only when the held login was injected. The placeholder refresh is answered locally and

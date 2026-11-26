@@ -30,7 +30,10 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  *
  * <ul>
  *   <li>{@code CONNECT <host>:443} is INTERCEPTED (a leaf of ours, {@code tls=intercepted}) even
- *       without a route, after the granted routes and before the passthrough.
+ *       without a route, after the granted routes and before the passthrough — but only while a
+ *       login is held ({@link ClaudeCredentials#current()}, decided per CONNECT). With none held the
+ *       host is like any other: the passthrough's blind splice, so a container without the
+ *       platform's anchor in its trust store keeps working until the hand-over.
  *   <li>{@code Authorization: Bearer qits-egress-placeholder} → {@code Bearer <held access token>};
  *       any other {@code Authorization} is forwarded unchanged ({@link ClaudeOutbound}).
  *   <li>{@code POST /v1/oauth/token} on {@value #TOKEN_HOST} whose JSON or form body carries {@code
@@ -38,7 +41,8 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  *       refresh Claude Code sends after a 401, which would otherwise blank its credentials file.
  *   <li>The held tokens are scrubbed out of every answer ({@link Scrubber}), streamed; WebSocket
  *       upgrades take the same swap.
- *   <li>Nothing held: a placeholder request is 503 {@code {"error":"no claude credential held"}}.
+ *   <li>Nothing held any more inside a tunnel intercepted while one was: a placeholder request is
+ *       503 {@code {"error":"no claude credential held"}}.
  *   <li>Audit {@code route=claude}.
  * </ul>
  */

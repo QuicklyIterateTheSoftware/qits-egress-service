@@ -56,7 +56,7 @@ import org.jboss.logging.Logger;
  * ForwardDoor}, qits-2654) carries its caller with it ({@link ForwardedCallers}); a principal with a
  * project reaches outside hosts no route covers through the {@link Passthrough}, and the Claude
  * hosts with the login this service holds ({@link ClaudeHosts}, qits-2664): granted routes first,
- * then the Claude hosts, then the passthrough.
+ * then the Claude hosts (only while a login is held), then the passthrough.
  *
  * <p>One call, in order:
  *
@@ -538,7 +538,12 @@ public class EgressProxy {
     }
     audit.target(authority.toString(), "-");
     boolean mayPass = passthrough.applies(verdict.principal());
-    boolean claudeHost = claude.serves(verdict.principal(), authority.host(), authority.port());
+    // A Claude host is intercepted only while a login is held (this replica's copy, re-read every
+    // 30 s; no store read here): with none held it is any other host, so a container without the
+    // platform's anchor in its trust store keeps reaching Claude until the hand-over.
+    boolean claudeHost =
+        claude.serves(verdict.principal(), authority.host(), authority.port())
+            && claudeCredentials.current() != null;
     GrantIndex.Table table = grants.current();
     if (table == null && !mayPass && !claudeHost) {
       refuse(request, audit, 503, "no-table", error("no grant table yet"));
@@ -564,7 +569,8 @@ public class EgressProxy {
       }
     }
     if (granted == null && reached == null && claudeHost) {
-      // A Claude host no route covers: intercepted all the same, its requests served by claude().
+      // A Claude host no route covers, a login held: intercepted all the same, its requests served
+      // by claude().
       audit.route(ClaudeHosts.ROUTE);
       interceptWithLeaf(call, authority, ClaudeHosts.ROUTE);
       return;

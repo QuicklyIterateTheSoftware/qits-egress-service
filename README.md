@@ -150,7 +150,7 @@ Claude behaviour; else the passthrough.
 
 - `CONNECT <host>:443` is **intercepted** (a leaf of ours; the Claude hosts are always among the
   leaves pre-issued) even without a route and without a grant table; audit `route=claude ...
-  tls=intercepted leafSerial=<hex>`.
+  tls=intercepted leafSerial=<hex>` — **but only while a login is held** (see below).
 - Each inner request (`proxy/ClaudeOutbound`): `Authorization: Bearer qits-egress-placeholder` →
   `Bearer <held access token>`; **any other `Authorization` goes on unchanged** (a container not cut
   over yet), so does the caller's `Cookie`; `Proxy-Authorization`, every `X-Qits-*` and the
@@ -164,8 +164,19 @@ Claude behaviour; else the passthrough.
   arrives event by event; `Accept-Encoding: identity`, an encoded answer is 502). `Set-Cookie` is
   dropped when the held login was injected, and passed on when the caller's own credential was.
 - A WebSocket upgrade takes the same swap on its handshake.
-- Nothing held: a placeholder request (and the placeholder refresh) is **503** `{"error":"no claude
-  credential held"}`, audit reason `no-claude-credential`. A request with its own bearer still goes.
+- Nothing held any more inside a tunnel intercepted while a login was: a placeholder request (and
+  the placeholder refresh) is **503** `{"error":"no claude credential held"}`, audit reason
+  `no-claude-credential`. A request with its own bearer still goes.
+
+**Intercepted only while held.** Whether a `CONNECT` to a Claude host is intercepted is decided per
+`CONNECT` from this replica's copy of the login (`ClaudeCredentials.current()`, re-read every 30 s;
+no store read per `CONNECT`) — exactly what `GET /egress/api/claude-credential` reports as `held`.
+While nothing is held a Claude host is any other host: a granted route first (none exists for these
+hosts), else the passthrough's blind splice for a principal with a project (audit
+`passthrough=true`, no `route=claude`, no `tls=intercepted`) — the client sees Anthropic's own
+certificate chain. So a container without the platform's anchor in its trust store (the
+long-running developer agent lease) keeps reaching Claude with its own login until the hand-over;
+only once a login is held does its TLS end here.
 
 | Key | Default |
 |---|---|
