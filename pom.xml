@@ -51,9 +51,9 @@
         <!-- Machine identity: the rollout gate every sibling shares. At least 2026.1125.60148, the
              first release carrying MachineIdentity.actor, which the caller identity of the proxy
              (qits-2620) reads. -->
-        <qits.auth-core.version>2026.1127.155354</qits.auth-core.version>
+        <qits.auth-core.version>2026.1127.174457</qits.auth-core.version>
         <!-- Caller stamping on inbound and outbound HTTP. -->
-        <qits.http-core.version>2026.1127.155354</qits.http-core.version>
+        <qits.http-core.version>2026.1127.174457</qits.http-core.version>
         <!-- OTLP export to qits-observability through the edge, with the `qits` client's bearer:
              the audit lines reach `qits observe` this way. -->
         <qits.telemetry-core.version>2026.1106.507</qits.telemetry-core.version>
@@ -70,7 +70,7 @@
         <!-- The consumer pact against qits-certificates-service (test scope): its `leaf issued`
              state, what tls/LeafDoor asks for a per-host leaf (qits-2643). A first adoption, pinned
              by hand; maintenance's bumps move it from here on. -->
-        <qits.certificates-golden-masters.version>2026.1125.100217</qits.certificates-golden-masters.version>
+        <qits.certificates-golden-masters.version>2026.1127.172534</qits.certificates-golden-masters.version>
         <!-- The shape qits-deployments pushes (test scope): its `GET /deployments/api/egress-grants`
              golden masters, the body of `PUT /egress/api/grant-table`, bound and indexed by
              contracts/consumer/DeploymentsGrantTableTest (qits-2660: the project-route state). A
