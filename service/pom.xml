@@ -6,7 +6,7 @@
     <parent>
         <groupId>eu.wohlben.qits</groupId>
         <artifactId>qits-egress</artifactId>
-        <version>2026.1126.195929</version>
+        <version>2026.1127.172433</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
     <!-- The deployable: health and the management API under /egress (port 8080, behind the public
