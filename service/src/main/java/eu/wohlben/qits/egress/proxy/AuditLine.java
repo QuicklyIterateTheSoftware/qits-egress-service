@@ -17,7 +17,9 @@ import org.jboss.logging.Logger;
  * ends in {@code tls=intercepted}; the {@code CONNECT} itself in {@code tls=intercepted
  * leafSerial=<hex>}, the leaf the tunnel's handshake is served. A call let through by the
  * passthrough (qits-2654) carries {@code passthrough=true}; a call carried over a {@code GET
- * /egress/api/forward} websocket, {@code via=forward}. It never carries a header value, a query value, a body or a secret:
+ * /egress/api/forward} websocket, {@code via=forward}. A call on the TLS proxy listener (8082,
+ * qits-2759) ends in {@code auth=bearer} or {@code auth=certificate clientSerial=<hex>}: which one
+ * decided who called; a line of 8081 carries neither and reads as it always did. It never carries a header value, a query value, a body or a secret:
  * the fields are the principal, the route name, the method, the target host, the path without its
  * query, the status — the upstream's for an allowed call, the gateway's own otherwise — and the
  * reason a call was refused. Every field the caller influences is reduced to a safe alphabet, so a
@@ -61,6 +63,21 @@ final class AuditLine {
   private volatile boolean passthrough;
 
   private volatile boolean forwarded;
+
+  private volatile Auth auth;
+
+  /**
+   * How a call on the TLS proxy listener was identified: {@code bearer} (a header), or {@code
+   * certificate} with the client certificate's serial (qits-2759).
+   */
+  record Auth(String how, String clientSerial) {
+
+    static final Auth BEARER = new Auth("bearer", null);
+
+    static Auth certificate(String serial) {
+      return new Auth("certificate", serial);
+    }
+  }
 
   AuditLine(String method, String path) {
     this.method = method;
@@ -130,6 +147,17 @@ final class AuditLine {
     return this;
   }
 
+  /** How the TLS listener identified the caller: {@code auth=…}. */
+  AuditLine auth(Auth auth) {
+    this.auth = auth;
+    return this;
+  }
+
+  /** How the caller was identified on the TLS listener, or null on 8081. */
+  Auth auth() {
+    return auth;
+  }
+
   /** Whether the line is written already. */
   boolean written() {
     return written.get();
@@ -177,7 +205,11 @@ final class AuditLine {
         + (intercepted ? " tls=intercepted" : "")
         + (leafSerial != null ? " leafSerial=" + clean(leafSerial) : "")
         + (passthrough && allowed ? " passthrough=true" : "")
-        + (forwarded ? " via=forward" : "");
+        + (forwarded ? " via=forward" : "")
+        + (auth == null ? "" : " auth=" + clean(auth.how()))
+        + (auth == null || auth.clientSerial() == null
+            ? ""
+            : " clientSerial=" + clean(auth.clientSerial()));
   }
 
   static String clean(String value) {

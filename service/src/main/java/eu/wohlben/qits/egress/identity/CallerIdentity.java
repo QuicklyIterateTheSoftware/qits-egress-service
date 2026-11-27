@@ -66,11 +66,11 @@ public class CallerIdentity {
    */
   public record Verdict(Principal principal, int status, String reason, String message) {
 
-    static Verdict of(Principal principal) {
+    public static Verdict of(Principal principal) {
       return new Verdict(principal, 0, null, null);
     }
 
-    static Verdict refused(int status, String reason, String message) {
+    public static Verdict refused(int status, String reason, String message) {
       return new Verdict(null, status, reason, message);
     }
 

@@ -28,6 +28,7 @@ The application is `qits-egress`, image `qits/qits-egress`, two replicas.
 |---|---|---|
 | 8080 | Quarkus HTTP, the **management** listener: `/egress/api` (the grant-table door, the Claude credential door (qits-2664), and the forward websocket `GET /egress/api/forward` that splices to 8081, qits-2654) and `/egress/q` (health) | `https://egress.qits.<domain>/egress` through the **public** edge; the deployer's healthcheck at `/egress/q/health/ready` |
 | 8081 | Vert.x server (HTTP/1.1, no h2c), the **proxy**: gateway form `/<route>/<rest>` (qits-2620), streams, WebSockets, scrubbing and the drain (qits-2621), absolute-form `HTTP(S)_PROXY` requests and `CONNECT` (qits-2622) | `http://${QITS_ENVIRONMENT}-qits-egress:8081`, the wire alias on qits-net only; no edge routes it |
+| 8082 | Vert.x server, TLS (JDK engine, HTTP/1.1), the **TLS proxy** (qits-2759): the same handler as 8081, every form; its server certificate is this service's workload certificate, and a client certificate is the caller's identity when no bearer is sent. Opens once a workload certificate is held | `https://${QITS_ENVIRONMENT}-qits-egress:8082` (`HTTPS_PROXY=https://…:8082` too), the wire alias on qits-net only |
 | 8443 | Vert.x server, TLS, bound to **127.0.0.1 only**: the **interception** listener, where a granted `CONNECT`'s TLS ends (qits-2644) | only by the proxy's own tunnels; nothing outside the process' network namespace |
 
 ## The grant table is pushed, not pulled
@@ -447,10 +448,11 @@ the connection closes:
 A request inside an intercepted tunnel appends ` tls=intercepted`; the `CONNECT` itself has
 `target=<host:port>` and appends ` tls=intercepted leafSerial=<hex>` (the leaf the tunnel's handshake
 is served), written when the tunnel closes. A call the passthrough let out appends
-` passthrough=true`; a call carried over a forward, ` via=forward` (last).
+` passthrough=true`; a call carried over a forward, ` via=forward`. A call on the TLS proxy
+listener (8082) appends, last, ` auth=bearer` or ` auth=certificate clientSerial=<hex>`.
 
 `status` is the upstream's for an allowed call and the gateway's own otherwise. Reasons:
-`no-credentials`, `bad-credentials`, `idp-unreachable`, `no-table`, `no-route`, `bad-path`,
+`no-credentials`, `bad-credentials`, `certificate-no-principal` (8082), `idp-unreachable`, `no-table`, `no-route`, `bad-path`,
 `no-grant`, `method-not-granted`, `bad-route`, `no-secret`, `exchange-refused`, `bad-target` (an
 absolute-form or `CONNECT` target that does not parse), `no-leaf` (a `CONNECT` whose host gets no
 leaf), `misdirected` (an inner request whose SNI or `Host` is not the tunnel's, 421), `no-tunnel` (a
@@ -462,6 +464,54 @@ door's), and on an ALLOW `forward` for the forward's own line,
 `upstream-unreachable` when the proxy answered 502 itself, `upstream-encoded` when a secret route's
 answer was encoded and refused, `claude-refresh` for a placeholder refresh answered here, `websocket` for a spliced socket (written at its close, status 101). Never a header value, a query value, a
 body or a secret; caller-influenced values are reduced to a safe alphabet.
+
+## The TLS proxy listener (8082, qits-2759)
+
+Epic qits-2626: a caller that sends no bearer proves itself with its workload certificate from
+qits-certificates. `EgressProxy` runs its own handler on a second Vert.x server, so 8082 serves
+exactly what 8081 serves (the gateway form, absolute-form requests and `CONNECT` with interception),
+and **8081 is unchanged**.
+
+- **Its server certificate** is this service's own workload certificate, from qits-trust-core's
+  `WorkloadCertificate` (`qits.workload-certificate.enabled=true`): `application:qits-egress`, DNS
+  SAN `<env>-qits-egress`, EKU serverAuth and clientAuth, renewed in memory at 2/3 of its day and
+  picked per handshake, so a renewal is served on the next one. Until one is held, **8082 is
+  closed**; `EgressProxy` looks every `qits.egress.tls-proxy.open-check` (5s) and opens it then.
+- **Client certificates are REQUESTED, never required**, and trusted against the **platform anchors
+  only** (`PlatformTrust.anchorsOnly()`: the live bundle, seeded from `QITS_TRUST_ANCHORS`), never a
+  public CA. It is a PKIX check, so the chain must also carry **EKU clientAuth**: an interception leaf
+  (serverAuth only, DNS names only) and a certificate of any other CA fail the handshake.
+- **Who calls**, in order:
+  1. a header bearer (`Authorization` in the gateway form, `Proxy-Authorization` in the proxy forms),
+     exactly as on 8081: it wins over any certificate;
+  2. else the client certificate: qits-auth-core's `WorkloadPrincipal.fromCertificate`, which needs
+     clientAuth and **exactly one** `urn:qits:principal:<application|agent|project>:<name>` URI (an
+     agent's `urn:qits:project:<id>` beside it). The CN and the DNS names decide nothing. A
+     certificate naming no principal is refused, reason `certificate-no-principal`. It is resolved
+     **once per TLS session** and kept on the session (`identity/ClientCertificates`);
+  3. else 401 in the gateway form, 407 in the proxy forms, reason `no-credentials`.
+
+  An agent's certificate holds its project's routes, as an agent's bearer does. A platform route
+  needs a bearer to exchange, so a caller identified by certificate alone gets its `exchange-refused`
+  502 there.
+- **Audit**: every line of 8082 ends in ` auth=bearer` or ` auth=certificate clientSerial=<hex>`,
+  calls inside a tunnel it opened too. A line of 8081 carries neither.
+- **The self-check** (`tls/TlsProxySelfCheck`): once 8082 opens and every hour after, the egress
+  dials its own 8082 on loopback with its own certificate, trusting the anchors only and checking
+  the host name `<env>-qits-egress`, sends `GET /tls-proxy-self-check/` with no bearer and expects the
+  403 to name `application:qits-egress`. One line on `eu.wohlben.qits.egress.tls`: INFO `egress
+  tls-proxy self-check ok principal=… serverSerial=… clientSerial=…`, or WARN `… failed reason=…
+  retryIn=1m`. Never part of readiness.
+- **Deployment**: nothing in `deployments.yml` changes. 8082 is reached on the wire alias like 8081,
+  which no edge routes; the image only `EXPOSE`s it.
+
+| Key | Default |
+|---|---|
+| `qits.egress.tls-proxy.enabled` | `true` |
+| `qits.egress.tls-proxy.port` | `8082` (`0` in `%test`) |
+| `qits.egress.tls-proxy.open-check` | `5s` |
+| `qits.egress.tls-proxy.self-check.enabled` / `.interval` / `.retry` | `true` (`false` in `%test`) / `1h` / `1m` |
+| `qits.workload-certificate.enabled` | `true` (`false` in `%test`) |
 
 ## Per-host leaves (`tls/`, qits-2643)
 

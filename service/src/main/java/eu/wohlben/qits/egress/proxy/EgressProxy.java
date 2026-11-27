@@ -4,9 +4,12 @@ import eu.wohlben.qits.egress.claude.ClaudeCredentials;
 import eu.wohlben.qits.egress.grants.GrantIndex;
 import eu.wohlben.qits.egress.grants.GrantRoute;
 import eu.wohlben.qits.egress.identity.CallerIdentity;
+import eu.wohlben.qits.egress.identity.ClientCertificates;
 import eu.wohlben.qits.egress.identity.PlatformBearers;
 import eu.wohlben.qits.egress.tls.Leaf;
 import eu.wohlben.qits.egress.tls.LeafCertificates;
+import eu.wohlben.qits.egress.tls.TlsProxyWiring;
+import eu.wohlben.qits.egress.tls.WorkloadTls;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
@@ -25,12 +28,17 @@ import io.vertx.core.http.HttpServerOptions;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
 import io.vertx.core.http.RequestOptions;
+import io.vertx.core.http.ClientAuth;
+import io.vertx.core.http.HttpVersion;
 import io.vertx.core.json.JsonObject;
+import io.vertx.core.net.JdkSSLEngineOptions;
 import io.vertx.core.net.PemTrustOptions;
+import io.vertx.core.net.TrustOptions;
 import io.vertx.httpproxy.HttpProxy;
 import io.vertx.httpproxy.OriginRequestProvider;
 import io.vertx.httpproxy.ProxyOptions;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Event;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import java.time.Duration;
@@ -97,6 +105,15 @@ import org.jboss.logging.Logger;
  * ({@link ProxyOptions#setSupportWebSocket}); {@link WebSocketSplice} handshakes and splices
  * itself.
  *
+ * <p><b>The TLS proxy listener</b> ({@code qits.egress.tls-proxy.port}, 8082, qits-2759) runs this
+ * same handler over TLS, on the wire alias. Its server certificate is this service's workload
+ * certificate ({@link WorkloadTls}: DNS SAN {@code <env>-qits-egress}); it asks for a client
+ * certificate and trusts the platform anchors alone. It opens once a certificate is held; until
+ * then 8082 is closed and 8081 is unaffected. Identity there: a header bearer wins, exactly as on
+ * 8081; without one, the client certificate's principal ({@link ClientCertificates}), once per TLS
+ * session; with neither, 407 (401 in the gateway form). Every line it writes carries {@code
+ * auth=bearer} or {@code auth=certificate clientSerial=<hex>}.
+ *
  * <p><b>Shutdown</b>: the {@code quarkus.shutdown.delay} (10 s) passes with the listener serving as
  * usual while swarm takes the task out of the VIP; then {@link #draining} refuses new connections
  * and waits for every call in flight — streams and sockets too, none closed early — up to {@code
@@ -128,6 +145,22 @@ public class EgressProxy {
 
   @Inject ClaudeCredentials claudeCredentials;
 
+  @Inject TlsProxyWiring tlsProxyWiring;
+
+  @Inject Event<TlsProxyListening> tlsProxyListening;
+
+  /** The TLS proxy listener's port (qits-2759); 0 picks a free one (the suites). */
+  @ConfigProperty(name = "qits.egress.tls-proxy.port", defaultValue = "8082")
+  int tlsProxyPort;
+
+  /** false: 8082 never opens. */
+  @ConfigProperty(name = "qits.egress.tls-proxy.enabled", defaultValue = "true")
+  boolean tlsProxyEnabled;
+
+  /** How often a closed 8082 looks for a held certificate. */
+  @ConfigProperty(name = "qits.egress.tls-proxy.open-check", defaultValue = "5s")
+  Duration tlsProxyOpenCheck;
+
   @ConfigProperty(name = "qits.egress.proxy.port", defaultValue = "8081")
   int port;
 
@@ -150,6 +183,13 @@ public class EgressProxy {
   Optional<String> upstreamTrust;
 
   private HttpServer server;
+
+  /** The TLS proxy listener (qits-2759), null until a certificate is held. */
+  private volatile HttpServer tlsProxy;
+
+  private boolean tlsProxyOpening;
+
+  private long tlsProxyTimer = -1;
 
   /** The interception listener: TLS ended inside {@code CONNECT} tunnels (qits-2644). */
   private HttpServer intercepting;
@@ -201,7 +241,7 @@ public class EgressProxy {
                     // body-less-but-unframed upstream write (Vert.x refuses it).
                     .setHttp2ClearTextEnabled(false))
             .connectionHandler(inFlight::accept)
-            .requestHandler(this::handle)
+            .requestHandler(request -> handle(request, false))
             .listen()
             .toCompletionStage()
             .toCompletableFuture()
@@ -220,6 +260,85 @@ public class EgressProxy {
     LOG.infof(
         "the egress interception listener listens on %s:%d",
         ConnectTunnel.LOOPBACK, intercepting.actualPort());
+    if (tlsProxyEnabled) {
+      openTlsProxy();
+      if (tlsProxy == null) {
+        tlsProxyTimer =
+            vertx.setPeriodic(
+                Math.max(1, tlsProxyOpenCheck.toMillis()), id -> openTlsProxy());
+      }
+    }
+  }
+
+  /**
+   * Opens 8082 once a workload certificate is held (qits-2759); a no-op before, and after. On the
+   * event loop of {@link #start} or the timer, never concurrently.
+   */
+  synchronized void openTlsProxy() {
+    if (tlsProxy != null || tlsProxyOpening || server == null) {
+      return;
+    }
+    WorkloadTls tls = tlsProxyWiring.tls();
+    if (tls.certificate() == null) {
+      return;
+    }
+    tlsProxyOpening = true;
+    vertx
+        .createHttpServer(tlsProxyOptions(host, tlsProxyPort, tls))
+        .connectionHandler(inFlight::accept)
+        .requestHandler(request -> handle(request, true))
+        .listen()
+        .onComplete(
+            result -> {
+              synchronized (this) {
+                tlsProxyOpening = false;
+                if (result.failed()) {
+                  LOG.errorf(
+                      "the TLS proxy listener cannot listen on %s:%d: %s",
+                      host, tlsProxyPort, result.cause().toString());
+                  return;
+                }
+                tlsProxy = result.result();
+                if (tlsProxyTimer >= 0) {
+                  vertx.cancelTimer(tlsProxyTimer);
+                  tlsProxyTimer = -1;
+                }
+              }
+              LOG.infof(
+                  "the egress TLS proxy listener listens on %s:%d as %s",
+                  host,
+                  tlsProxy.actualPort(),
+                  tls.certificate() == null
+                      ? "-"
+                      : tls.certificate().getSubjectX500Principal().getName());
+              tlsProxyListening.fire(new TlsProxyListening(tlsProxy.actualPort()));
+            });
+  }
+
+  /**
+   * 8082's options: TLS by the JDK engine, the workload certificate picked per handshake (a renewal
+   * is served on the next one), a client certificate REQUESTED and trusted against the platform
+   * anchors only — a PKIX check, so it must carry EKU clientAuth — HTTP/1.1 only, as 8081.
+   */
+  static HttpServerOptions tlsProxyOptions(String host, int port, WorkloadTls tls) {
+    return new HttpServerOptions()
+        .setHost(host)
+        .setPort(port)
+        .setSsl(true)
+        .setSni(false)
+        .setKeyCertOptions(tls.keyCertOptions())
+        .setTrustOptions(TrustOptions.wrap(tls.clientTrust()))
+        .setClientAuth(ClientAuth.REQUEST)
+        .setSslEngineOptions(new JdkSSLEngineOptions())
+        .setUseAlpn(true)
+        .setAlpnVersions(List.of(HttpVersion.HTTP_1_1))
+        .setHttp2ClearTextEnabled(false);
+  }
+
+  /** The TLS proxy listener's port once it listens, else -1. */
+  public int tlsProxyPort() {
+    HttpServer current = tlsProxy;
+    return current == null ? -1 : current.actualPort();
   }
 
   private Pool pool(String name) {
@@ -270,6 +389,9 @@ public class EgressProxy {
   void draining(@Observes ShutdownEvent event) {
     if (checkTimer >= 0) {
       vertx.cancelTimer(checkTimer);
+    }
+    if (tlsProxyTimer >= 0) {
+      vertx.cancelTimer(tlsProxyTimer);
     }
     if (server != null) {
       drain(shutdownTimeout);
@@ -338,7 +460,12 @@ public class EgressProxy {
     }
   }
 
-  void handle(HttpServerRequest request) {
+  /**
+   * One request on 8081, or on the TLS proxy listener ({@code tls}): the same steps on both; only
+   * who the caller is differs — on 8082 a request with no header bearer is its connection's client
+   * certificate, and there are no forwards.
+   */
+  void handle(HttpServerRequest request, boolean tls) {
     // Held until there is somewhere to send it: identifying the caller may ask idp.
     request.pause();
     Form form = Form.of(request);
@@ -362,7 +489,8 @@ public class EgressProxy {
     if (gateway != null) {
       audit.route(gateway.route());
     }
-    ForwardedCallers.Forward forward = forwards.of(request.connection());
+    // A forward is spliced onto 8081 on loopback; a TLS connection is never one.
+    ForwardedCallers.Forward forward = tls ? null : forwards.of(request.connection());
     if (forward != null) {
       audit.forwarded();
     }
@@ -373,8 +501,21 @@ public class EgressProxy {
     // Over a forward, a request that names no credential of its own is the forward's caller; one
     // that does (a Claude launch sends the agent's own token) is whoever that credential says.
     boolean asForwarded = forward != null && presented == null;
+    // On 8082 a request that names no credential is its connection's client certificate.
+    ClientCertificates.Identified certificate =
+        tls && presented == null ? ClientCertificates.of(request.connection().sslSession()) : null;
+    if (tls) {
+      audit.auth(
+          certificate == null
+              ? AuditLine.Auth.BEARER
+              : AuditLine.Auth.certificate(certificate.serial()));
+    }
     String bearer = asForwarded ? forward.bearer() : rawBearer(credential);
-    (asForwarded ? Future.succeededFuture(forward.verdict()) : callers.identify(credential))
+    (asForwarded
+            ? Future.succeededFuture(forward.verdict())
+            : certificate != null
+                ? Future.succeededFuture(certificate.verdict())
+                : callers.identify(credential))
         .onComplete(
             result -> {
               if (result.failed()) {
@@ -631,7 +772,8 @@ public class EgressProxy {
         call.request(),
         intercepting.actualPort(),
         interception,
-        new Interception.Tunnel(call.verdict(), authority, route, call.forwarded()),
+        new Interception.Tunnel(
+            call.verdict(), authority, route, call.forwarded(), audit.auth()),
         call.exchange(),
         audit);
   }
@@ -663,6 +805,9 @@ public class EgressProxy {
     audit.principal(tunnel.verdict().principal());
     if (tunnel.forwarded()) {
       audit.forwarded();
+    }
+    if (tunnel.auth() != null) {
+      audit.auth(tunnel.auth());
     }
     String sni = Interception.sniHost(request.connection());
     audit.target(sni == null ? tunnel.authority().host() : sni, path);

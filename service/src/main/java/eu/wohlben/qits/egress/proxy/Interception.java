@@ -38,12 +38,15 @@ final class Interception {
    * @param route the route that granted the {@code CONNECT}
    * @param forwarded whether the {@code CONNECT} came over a forward ({@link ForwardedCallers}):
    *     every request inside is audited {@code via=forward} too
+   * @param auth how the TLS proxy listener identified the {@code CONNECT}'s caller (qits-2759), or
+   *     null on 8081: every request inside is audited with it too
    */
   record Tunnel(
       CallerIdentity.Verdict verdict,
       ConnectTunnel.Authority authority,
       String route,
-      boolean forwarded) {}
+      boolean forwarded,
+      AuditLine.Auth auth) {}
 
   private final Map<Integer, Tunnel> byPort = new ConcurrentHashMap<>();
 

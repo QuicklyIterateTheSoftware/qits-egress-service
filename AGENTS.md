@@ -32,7 +32,9 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
     builds two replicas), `ClaudeTokenEndpoint` (the call at `platform.claude.com/v1/oauth/token`);
   - `grants/` the in-memory index each replica enforces and its refresh (`GrantIndex`, `GrantRoute`);
   - `identity/` the proxy listener's caller identity (`CallerIdentity`, `IdpKeys`, `SignedJwt`,
-    `IdpIntrospection`, `Principal`), copied from qits-edge and adapted, and a platform route's
+    `IdpIntrospection`, `Principal`), copied from qits-edge and adapted — `Principal.of` is now
+    qits-auth-core's `WorkloadPrincipal.fromClaims` (qits-2759) — the client certificate's caller on
+    8082 (`ClientCertificates`), and a platform route's
     token exchange (`IdpTokenExchange`, the cache `PlatformBearers`);
   - `proxy/` the 8081 listener (`EgressProxy`), what leaves for the upstream (`EgressOutbound`),
     the audit line (`AuditLine`), the secrets (`SecretStore`), the HTTPS_PROXY forms
@@ -60,7 +62,10 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
     `GrantTableAdopted` observer, the periodic tick, the producer; a `LeafIssuer` bean replaces the
     door — the suites' `SuiteLeafIssuer`); and for interception (qits-2644) `SniKeyManager` (the key
     per handshake by SNI), `TlsSelfCheck` (the live proof, its schedule in `TlsSelfCheck.Runner`) and
-    `AnchorTrust` (trust in the published anchors only).
+    `AnchorTrust` (trust in the published anchors only); and for the TLS proxy listener (qits-2759)
+    `WorkloadTls` (its server certificate and client trust; `PlatformWorkloadTls` in a deployment,
+    a `WorkloadTls` bean in the suites — `SuiteWorkloadTls` — chosen by `TlsProxyWiring`) and
+    `TlsProxySelfCheck` (8082 dialled with egress' own certificate).
 
 ## Conventions
 
@@ -72,6 +77,12 @@ qits-maintenance's bumps — never by hand (a first adoption is the exception: i
   over it is judged on 8081 like any other. Never serve or decide a proxied request on 8080. The third, the interception listener (`qits.egress.tls.port`, 8443), is bound to
   `127.0.0.1` and reached only by the proxy's own tunnels: never bind it anywhere else, and never
   serve a request on it whose tunnel entry is missing.
+- **8082 is 8081 over TLS, nothing more** (qits-2759): the same `EgressProxy.handle`, never a
+  second route match or check. A header bearer always wins; only a request with none is its
+  connection's client certificate (`ClientCertificates`, once per TLS session). Client trust is the
+  platform anchors only (`PlatformTrust.anchorsOnly()`, a PKIX check that also demands EKU
+  clientAuth) — never public CAs, never trust-all, never the CN. 8082 has no forwards. Its lines
+  carry `auth=`; never add a field to 8081's lines.
 - **A tunnel's TLS ends here, and its requests take the absolute-form path** (`EgressProxy.absolute`):
   never add a second route match, injection or scrub for intercepted requests. A `CONNECT` reaches
   `https` routes only; a plain-http route is never tunnelled.
@@ -179,6 +190,10 @@ Green in `./mvnw verify`, broken only in the native binary. Keep them in mind:
   plain Java (`KeyCertOptions.wrap(X509KeyManager)`): no OpenSSL, no reflection, no Bouncy Castle
   provider. The self-check builds its `SSLContext`, `KeyStore` and PKIX `TrustManagerFactory` per
   run and passes no `SecureRandom` of its own. `quarkus.ssl.native=true` carries the JDK's TLS.
+- **The TLS proxy listener** is the JDK's `SSLEngine` too, its key manager qits-trust-core's
+  rotating `WorkloadCertificate.keyManager()` (`KeyCertOptions.wrap`), its client trust a plain
+  `X509TrustManager` (`TrustOptions.wrap`): no OpenSSL, no Bouncy Castle provider. The workload key
+  is made at run time in qits-trust-core and never leaves the process.
 - **No JSON binding in `tls/`**: the leaf answer is read as a Vert.x `JsonObject` tree, so there is
   no type to register for reflection; a record bound by Jackson would join a `@RegisterForReflection`
   list with its test.
@@ -232,6 +247,16 @@ every `@QuarkusTest` the leaves come from `tls/SuiteLeafIssuer` (a `LeafIssuer` 
 `LeafDoor` to a fake qits-certificates in its own JVM and drives `curl -x` through a tunnel. The
 self-check is off in `%test`: its schedule is `TlsSelfCheckTest`, its probe runs against the real
 listeners in `EgressInterceptionTest`.
+
+## The suites' workload certificates
+
+`tls/SuiteWorkloadTls` (a `WorkloadTls` bean) gives 8082 egress' own certificate
+(`application:qits-egress`, DNS `dev-qits-egress` and `localhost`) and trusts `SuiteTls`'s
+`workload` CA alone, standing in for the platform anchors; `support/SuiteWorkloads` signs the
+callers' certificates (and the shapes 8082 refuses: an interception leaf, another CA's, two
+principals). `SuiteWorkloads.clientInsisting` presents a certificate whatever issuers the server
+names, so the server's own refusal is what a test sees. `%test` switches qits-trust-core's
+`WorkloadCertificate` and anchors poller off: no suite reaches qits-certificates.
 
 ## The userflow catalogue
 

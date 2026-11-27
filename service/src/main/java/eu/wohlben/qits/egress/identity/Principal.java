@@ -1,6 +1,6 @@
 package eu.wohlben.qits.egress.identity;
 
-import io.vertx.core.json.JsonArray;
+import eu.wohlben.qits.auth.WorkloadPrincipal;
 import io.vertx.core.json.JsonObject;
 
 /**
@@ -62,44 +62,18 @@ public record Principal(String kind, String name, String project) {
   }
 
   /**
-   * Map a validated token's claims to a principal.
+   * Map a validated token's claims to a principal: qits-auth-core's {@link
+   * WorkloadPrincipal#fromClaims}, the one copy of the grammar the workload certificates are issued
+   * and read in (epic qits-2626, qits-2755; the rules moved there unchanged).
    *
    * @param environment {@code QITS_ENVIRONMENT}, the prefix of every service client's id
    */
   public static Principal of(JsonObject claims, String environment) {
-    String subject = text(claims.getValue("sub"));
-    JsonArray groups = groups(claims.getValue("groups"));
-    String prefix = environment + "-";
-    if (subject != null
-        && subject.startsWith(prefix)
-        && subject.length() > prefix.length()
-        && groups.contains("clients/" + subject)
-        && groups.contains("qits:system")) {
-      return new Principal(APPLICATION, subject.substring(prefix.length()));
-    }
-    String agent = text(claims.getValue("agent"));
-    String project = text(claims.getValue("project"));
-    if (agent != null) {
-      return new Principal(AGENT, agent, project);
-    }
-    if (project != null) {
-      return new Principal(PROJECT, project, project);
-    }
-    return new Principal("subject", subject == null ? "-" : subject);
+    return of(WorkloadPrincipal.fromClaims(claims.getMap(), environment));
   }
 
-  private static JsonArray groups(Object value) {
-    if (value instanceof JsonArray array) {
-      return array;
-    }
-    return value == null ? new JsonArray() : new JsonArray().add(value);
-  }
-
-  private static String text(Object value) {
-    if (value == null) {
-      return null;
-    }
-    String text = value.toString();
-    return text.isBlank() ? null : text;
+  /** The same principal in this service's type. */
+  public static Principal of(WorkloadPrincipal principal) {
+    return new Principal(principal.kind(), principal.name(), principal.project());
   }
 }

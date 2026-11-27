@@ -70,8 +70,8 @@ COPY --from=build --chown=1001:root /src/service/target/qits-egress /work/qits-e
 RUN chmod +x /work/qits-egress
 
 # Nothing to own: every durable fact (the grant table) is a row in the database. 8080 is the
-# management listener behind the public edge; 8081 the proxy (qits-2620), on the wire alias only.
-EXPOSE 8080 8081
+# management listener behind the public edge; 8081 the proxy (qits-2620), on the wire alias only; 8082 the same proxy over TLS (qits-2759).
+EXPOSE 8080 8081 8082
 USER 1001
 
 # Quarkus binds 127.0.0.1 outside dev mode, which inside a container means nothing can reach it.

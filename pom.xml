@@ -54,6 +54,12 @@
         <qits.auth-core.version>2026.1127.174457</qits.auth-core.version>
         <!-- Caller stamping on inbound and outbound HTTP. -->
         <qits.http-core.version>2026.1127.174457</qits.http-core.version>
+        <!-- The platform trust and this service's own workload certificate (epic qits-2626,
+             qits-2759): PlatformTrust.anchorsOnly() is the 8082 listener's client trust, and
+             WorkloadCertificate its server certificate. FIRST ADOPTION, pinned by hand at the
+             release that carries WorkloadCertificate (qits-2758); maintenance's bumps move it from
+             here on, with auth-core and http-core, which it must match. -->
+        <qits.trust-core.version>2026.1127.174457</qits.trust-core.version>
         <!-- OTLP export to qits-observability through the edge, with the `qits` client's bearer:
              the audit lines reach `qits observe` this way. -->
         <qits.telemetry-core.version>2026.1106.507</qits.telemetry-core.version>
@@ -158,6 +164,11 @@
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-http-core</artifactId>
                 <version>${qits.http-core.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-trust-core</artifactId>
+                <version>${qits.trust-core.version}</version>
             </dependency>
             <dependency>
                 <groupId>${project.groupId}</groupId>

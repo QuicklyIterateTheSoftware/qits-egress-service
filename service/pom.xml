@@ -68,6 +68,11 @@
             <artifactId>qits-http-core</artifactId>
         </dependency>
         <dependency>
+            <!-- PlatformTrust and WorkloadCertificate: the TLS proxy listener on 8082 (qits-2759). -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-trust-core</artifactId>
+        </dependency>
+        <dependency>
             <!-- Bearer validation against qits-idp. -->
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-oidc</artifactId>
